@@ -1,6 +1,7 @@
 use std::process::{Command, exit};
 use std::fs;
 use std::ffi::CString;
+use std::io::{self, Write};
 use libc;
 use nix::mount::{mount, MsFlags};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -48,38 +49,55 @@ fn mount_run() -> Result<(), Error> {
     )
 }
 
+fn print_error(msg: &str) {
+    println!("{} {}", status_fail(), msg);
+}
+
+
 fn start_drives() {
-    print!("{} Mounting /proc...", tag_boot());
+    // Mount /proc
+    print!("{} Mounting /proc... ", tag_boot());
+    io::stdout().flush().unwrap();
 
     if let Err(e) = mount_proc() {
-        eprintln!("{} Failed to mount /proc: {}", status_fail(), e);
+        println!(); // Move to next line before error
+        print_error(&format!("Failed to mount /proc: {}", e)); 
         exit(1);
     }
     println!("{}", status_ok());
 
-    print!("{} Mounting /sys...", tag_boot());
+    // Mount /sys
+    print!("{} Mounting /sys... ", tag_boot());
+    io::stdout().flush().unwrap();
 
     if let Err(e) = mount_sys() {
-        eprintln!("{} Failed to mount /sys: {}", status_fail(), e);
+        println!();
+        print_error(&format!("Failed to mount /sys: {}", e)); 
         exit(1);
     }
-    println!("    {}", status_ok());
-    
-    print!("{} Mounting /dev...", tag_boot());
+    println!("{}", status_ok());
+
+    // Mount /dev
+    print!("{} Mounting /dev... ", tag_boot());
+    io::stdout().flush().unwrap();
 
     if let Err(e) = mount_dev() {
-        eprintln!("{} Failed to mount /dev: {}", status_fail(), e);
+        println!();
+        print_error(&format!("Failed to mount /dev: {}", e));
         exit(1);
     }
-    println!("    {}", status_ok());
+    println!("{}", status_ok());
 
-    print!("{} Mounting /run...", tag_boot());
+    // Mount /run
+    print!("{} Mounting /run... ", tag_boot());
+    io::stdout().flush().unwrap();
 
     if let Err(e) = mount_run() {
-        eprintln!("{} Failed to mount /run: {}", status_fail(), e);
+        println!();
+        print_error(&format!("Failed to mount /run: {}", e));
         exit(1);
     }
-    println!("    {}", status_ok());
+    println!("{}", status_ok());
 }
 
 pub fn init_hostname() -> Result<(), Box<dyn std::error::Error>> {
