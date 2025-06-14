@@ -30,7 +30,7 @@ fn mount_sys() -> Result<(), Error> {
 
 fn mount_dev() -> Result<(), Error> {
     mount(
-        Some("udev"),
+        Some("devtmpfs"),
         "/dev",
         Some("devtmpfs"),
         MsFlags::empty(),
