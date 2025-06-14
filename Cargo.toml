@@ -5,3 +5,5 @@ members = [
     "verdantd",
     "verdantctl"
 ]
+
+resolver = "3"
