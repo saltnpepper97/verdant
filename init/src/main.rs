@@ -49,7 +49,7 @@ fn mount_run() -> Result<(), Error> {
 }
 
 fn start_drives() {
-    println!("{} Mounting /proc...", tag_boot());
+    print!("{} Mounting /proc...", tag_boot());
 
     if let Err(e) = mount_proc() {
         eprintln!("{} Failed to mount /proc: {}", status_fail(), e);
@@ -57,7 +57,7 @@ fn start_drives() {
     }
     println!("{}", status_ok());
 
-    println!("{} Mounting /sys...", tag_boot());
+    print!("{} Mounting /sys...", tag_boot());
 
     if let Err(e) = mount_sys() {
         eprintln!("{} Failed to mount /sys: {}", status_fail(), e);
@@ -65,7 +65,7 @@ fn start_drives() {
     }
     println!("    {}", status_ok());
     
-    println!("{} Mounting /dev...", tag_boot());
+    print!("{} Mounting /dev...", tag_boot());
 
     if let Err(e) = mount_dev() {
         eprintln!("{} Failed to mount /dev: {}", status_fail(), e);
@@ -73,7 +73,7 @@ fn start_drives() {
     }
     println!("    {}", status_ok());
 
-    println!("{} Mounting /run...", tag_boot());
+    print!("{} Mounting /run...", tag_boot());
 
     if let Err(e) = mount_run() {
         eprintln!("{} Failed to mount /run: {}", status_fail(), e);
