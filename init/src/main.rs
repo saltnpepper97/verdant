@@ -53,51 +53,46 @@ fn print_error(msg: &str) {
     println!("{} {}", status_fail(), msg);
 }
 
-
 fn start_drives() {
     // Mount /proc
-    print!("{} Mounting /proc... ", tag_boot());
+    println!("{} Mounting /proc...", tag_boot());
     io::stdout().flush().unwrap();
 
     if let Err(e) = mount_proc() {
-        println!(); // Move to next line before error
         print_error(&format!("Failed to mount /proc: {}", e)); 
         exit(1);
     }
-    println!("{}", status_ok());
+    println!("{} /proc mounted successfully", status_ok());
 
     // Mount /sys
-    print!("{} Mounting /sys... ", tag_boot());
+    println!("{} Mounting /sys...", tag_boot());
     io::stdout().flush().unwrap();
 
     if let Err(e) = mount_sys() {
-        println!();
         print_error(&format!("Failed to mount /sys: {}", e)); 
         exit(1);
     }
-    println!("{}", status_ok());
+    println!("{} /sys mounted successfully", status_ok());
 
     // Mount /dev
-    print!("{} Mounting /dev... ", tag_boot());
+    println!("{} Mounting /dev...", tag_boot());
     io::stdout().flush().unwrap();
 
     if let Err(e) = mount_dev() {
-        println!();
         print_error(&format!("Failed to mount /dev: {}", e));
         exit(1);
     }
-    println!("{}", status_ok());
+    println!("{} /dev mounted successfully", status_ok());
 
     // Mount /run
-    print!("{} Mounting /run... ", tag_boot());
+    println!("{} Mounting /run...", tag_boot());
     io::stdout().flush().unwrap();
 
     if let Err(e) = mount_run() {
-        println!();
         print_error(&format!("Failed to mount /run: {}", e));
         exit(1);
     }
-    println!("{}", status_ok());
+    println!("{} /run mounted successfully", status_ok());
 }
 
 pub fn init_hostname() -> Result<(), Box<dyn std::error::Error>> {
@@ -120,18 +115,11 @@ pub fn init_hostname() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() {
-
-    // Check we are running as PID 1
-    //if std::process::id() != 1 {
-    //    eprintln!("This program must be run as PID 1.");
-    //    std::process::exit(1);
-    //}
-
     // Startup banner
     verdant_banner();
 
     // Start the necessary drives
-    start_drives();
+    //start_drives();
 
     // Set hostname
     let _ = init_hostname();
@@ -147,12 +135,11 @@ fn main() {
             exit(0);
         }
         Ok(ForkResult::Parent { child }) => {
-            println!("    {} started with PID {}", status_ok(), child);
+            println!("{} started with PID {}", status_ok(), child);
             // Wait for children and reap zombies
             loop {
                 match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
                     Ok(WaitStatus::StillAlive) => {
-                        // Sleep or do minimal work
                         std::thread::sleep(std::time::Duration::from_secs(1));
                     }
                     Ok(status) => {
@@ -170,3 +157,4 @@ fn main() {
         }
     }
 }
+
