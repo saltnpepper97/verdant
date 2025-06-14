@@ -20,9 +20,9 @@ fn mount_proc() -> Result<(), Error> {
 
 fn mount_sys() -> Result<(), Error> {
     mount(
-        Some("sys"),
+        Some("sysfs"),
         "/sys",
-        Some("sys"),
+        Some("sysfs"),
         MsFlags::empty(),
         None::<&str>,
     )
@@ -55,7 +55,7 @@ fn start_drives() {
         eprintln!("{} Failed to mount /proc: {}", status_fail(), e);
         exit(1);
     }
-    println!("    {}", status_ok());
+    println!("{}", status_ok());
 
     println!("{} Mounting /sys...", tag_boot());
 
