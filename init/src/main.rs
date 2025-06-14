@@ -119,7 +119,7 @@ fn main() {
     verdant_banner();
 
     // Start the necessary drives
-    //start_drives();
+    start_drives();
 
     // Set hostname
     let _ = init_hostname();
