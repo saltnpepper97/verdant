@@ -1,17 +1,10 @@
 [workspace]
 members = [
-<<<<<<< HEAD
-    "init",
-    "common",
-    "verdantd",
-    "verdantctl"
-=======
     "common",
     "verdant-init",
     "verdantd",
     "verdantctl",
     "ipc_protocol"
->>>>>>> 3b07a92 (Lot's of changes)
 ]
 
 resolver = "3"

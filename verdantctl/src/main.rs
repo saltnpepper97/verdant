@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-fn main() {
-    println!("Hello, world!");
-}
-=======
 use clap::{Parser, Subcommand};
 use std::path::Path;
 use tokio::{
@@ -27,6 +22,9 @@ enum Command {
 
     /// Stop a service
     Stop { name: String },
+
+    /// Restart a service
+    Restart { name: String },
 
     /// Enable a kernel module
     EnableModule { name: String },
@@ -59,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let request = match cli.command {
         Command::Start { name } => Request::StartService { name },
         Command::Stop { name } => Request::StopService { name },
+        Command::Restart { name } => Request::RestartService { name },
         Command::EnableModule { name } => Request::EnableModule { name },
         Command::DisableModule { name } => Request::DisableModule { name },
         Command::Status => Request::Status,
@@ -89,5 +88,3 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-
->>>>>>> 3b07a92 (Lot's of changes)

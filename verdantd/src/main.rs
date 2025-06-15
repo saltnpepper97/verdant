@@ -103,6 +103,8 @@ fn handle_request(req: Request, supervisor: &mut Supervisor) -> Response {
         Request::Shutdown => {
             if let Err(e) = supervisor.stop_all_services() {
                 Response::Error(format!("Failed to stop services: {}", e))
+            } else if let Err(e) = do_shutdown() {
+                Response::Error(format!("Failed to shutdown: {}", e))
             } else {
                 Response::Ok
             }
@@ -118,14 +120,34 @@ fn handle_request(req: Request, supervisor: &mut Supervisor) -> Response {
             }
         }
 
-        Request::EnableModule { name } => Response::Ok,
-        Request::DisableModule { name } => Response::Ok,
+        Request::EnableModule { name: _ } => Response::Ok,
+        Request::DisableModule { name: _ } => Response::Ok,
         Request::Status => Response::StatusInfo("Supervisor is running".to_string()),
-        _ => Response::Error("Unsupported request".to_string()),
     }
 }
 
-fn do_reboot() -> anyhow::Result<()> {
-    reboot(RebootMode::RB_AUTOBOOT)?;
+fn allow_power_ops() -> bool {
+    Path::new("/run/verdant/allow_power_ops").exists()
+}
+
+fn do_shutdown() -> anyhow::Result<()> {
+    if !allow_power_ops() {
+        return Err(anyhow::anyhow!("Shutdown not permitted: missing power-op auth file"));
+    }
+    std::fs::write("/run/verdant/request_shutdown", "1")?;
     Ok(())
 }
+<<<<<<< HEAD
+=======
+
+
+fn do_reboot() -> anyhow::Result<()> {
+    if !allow_power_ops() {
+        return Err(anyhow::anyhow!("Reboot not permitted: missing power-op auth file"));
+    }
+    std::fs::write("/run/verdant/request_reboot", "1")?;
+    Ok(())
+}
+
+
+>>>>>>> ec2ff1d (Shutdown and Reboot calls created.)

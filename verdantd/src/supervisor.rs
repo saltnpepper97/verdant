@@ -4,7 +4,7 @@ use std::{collections::HashMap, fs, path::Path, sync::{Arc, Mutex}};
 use anyhow::{anyhow, Result};
 use common::utils::*;
 use crate::service::{ServiceConfig, Service, LogMode};
-use crate::service_runner::{run_loop, spawn_service};
+use crate::service_runner::spawn_service;
 
 const SERVICES_DIR: &str = "/etc/verdant/services";
 const ENABLED_DIR: &str = "/etc/verdant/enabled";
