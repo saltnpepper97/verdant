@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-fn main() {
-    println!("Hello, world!");
-}
-=======
 mod ipc;
 mod supervisor;
 mod service;
@@ -134,5 +129,3 @@ fn do_reboot() -> anyhow::Result<()> {
     reboot(RebootMode::RB_AUTOBOOT)?;
     Ok(())
 }
-
->>>>>>> 3b07a92 (Lot's of changes)
