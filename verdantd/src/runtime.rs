@@ -22,9 +22,13 @@ impl ManagedService {
         if let Some(args) = &self.config.args {
             cmd.args(args);
         }
-        let child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
+        print_step(
+            &format!("Launched service {} (PID {})", self.config.name, pid),
+            &status_ok(),
+        );
         self.child = Some(child);
-        print_step(&format!("Launched service {}", self.config.name), &status_ok());
         Ok(())
     }
 
@@ -32,15 +36,24 @@ impl ManagedService {
         if let Some(child) = &mut self.child {
             match child.try_wait()? {
                 Some(status) => {
-                    print_step(&format!("Service {} exited with {:?}", self.config.name, status), &status_fail());
+                    print_step(
+                        &format!("Service {} exited with {:?}", self.config.name, status),
+                        &status_fail(),
+                    );
 
                     match self.config.restart {
                         RestartPolicy::Always => {
-                            print_step(&format!("Restarting service {} (always)", self.config.name), &status_ok());
+                            print_step(
+                                &format!("Restarting service {} (policy: always)", self.config.name),
+                                &status_ok(),
+                            );
                             self.launch()?;
                         }
                         RestartPolicy::OnFailure if !status.success() => {
-                            print_step(&format!("Restarting service {} (on-failure)", self.config.name), &status_ok());
+                            print_step(
+                                &format!("Restarting service {} (policy: on-failure)", self.config.name),
+                                &status_ok(),
+                            );
                             self.launch()?;
                         }
                         RestartPolicy::Never | RestartPolicy::OnFailure => {
@@ -49,7 +62,6 @@ impl ManagedService {
                     }
                 }
                 None => {
-                    // Child still running
                 }
             }
         } else {
@@ -84,3 +96,4 @@ impl ServiceManager {
         }
     }
 }
+

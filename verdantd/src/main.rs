@@ -1,7 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
-use common::*;
+use common::{print_step, status_ok};
 
 mod service;
 mod loader;
@@ -11,7 +11,7 @@ use crate::loader::load_enabled_services;
 use crate::runtime::ServiceManager;
 
 fn main() {
-    print_info_step("verdantd is starting up...");
+    print_step("verdantd started successfully", &status_ok());
 
     // Initial service load
     let configs = load_enabled_services();
