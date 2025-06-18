@@ -42,7 +42,6 @@ fn load_module(module: &str, is_last: bool) -> Result<(), ()> {
             Ok(())
         }
         Ok(_) | Err(_) => {
-            print_substep(&format!("Failed to load module {}", module), &status_fail());
             Err(())
         }
     }

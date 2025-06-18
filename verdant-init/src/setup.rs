@@ -101,7 +101,7 @@ pub fn setup_device_manager() {
             .status()
             .is_ok()
         {
-            print_step("Initialized /dev with mdev -s", &status_ok());
+            print_step("Started busybox mdev", &status_ok());
             true
         } else {
             print_step("Failed to run mdev -s", &status_fail());
