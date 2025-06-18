@@ -5,8 +5,10 @@ mod handoff;
 
 use std::thread::sleep;
 use std::time::Duration;
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::Pid;
 
-use common::verdant_banner;
+use common::{print_step, status_ok, verdant_banner};
 use mount::mount_essential;
 use modules::{load_modules_from_map, merge_module_configs};
 use handoff::handoff_to_verdantd;
@@ -26,9 +28,7 @@ fn main() {
 
     setup_lock_dir();
     setup_runtime_dirs();
-
     setup_hostname();
-
     setup_device_manager();
 
     if let Ok(modules) = merge_module_configs() {
@@ -41,8 +41,24 @@ fn main() {
     }
 
     println!();
-
+ 
+    if reap_zombies() {
+        print_step("Reaped zombie processes", &status_ok());
+    }
+    
     handoff_to_verdantd() 
 }
 
+fn reap_zombies() -> bool {
+    let mut reaped_any = false;
+
+    loop {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) | Err(_) => break,
+            Ok(_) => reaped_any = true,
+        }
+    }
+
+    reaped_any
+}
 
