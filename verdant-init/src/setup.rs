@@ -54,61 +54,76 @@ pub fn get_os_name() -> String {
 }
 
 pub fn setup_device_manager() {
-    // Open /dev/null for output redirection
     let dev_null = || File::open("/dev/null").unwrap_or_else(|_| {
         print_step("Failed to open /dev/null", &status_fail());
         std::process::exit(1);
     });
 
-    if Path::new("/lib/systemd/systemd-udevd").exists() {
-        // Arch-like system with systemd-udevd
-        if let Err(_) = Command::new("/lib/systemd/systemd-udevd")
+    let started = if Path::new("/lib/systemd/systemd-udevd").exists() {
+        if Command::new("/lib/systemd/systemd-udevd")
             .arg("--daemon")
             .stdout(Stdio::from(dev_null()))
             .stderr(Stdio::from(dev_null()))
             .status()
+            .is_ok()
         {
-            print_step("Failed to start systemd-udevd", &status_fail());
-        } else {
             print_step("Started udevd", &status_ok());
+            true
+        } else {
+            print_step("Failed to start systemd-udevd", &status_fail());
+            false
         }
-
     } else if Path::new("/sbin/udevd").exists() || Path::new("/usr/lib/udevd").exists() {
-        // Generic udevd systems (e.g. Debian)
         let udev_path = if Path::new("/sbin/udevd").exists() {
             "/sbin/udevd"
         } else {
             "/usr/lib/udevd"
         };
-
-        if let Err(_) = Command::new(udev_path)
+        if Command::new(udev_path)
             .arg("--daemon")
             .stdout(Stdio::from(dev_null()))
             .stderr(Stdio::from(dev_null()))
             .status()
+            .is_ok()
         {
-            print_step("Failed to start udevd", &status_fail());
-        } else {
             print_step("Started udevd", &status_ok());
+            true
+        } else {
+            print_step("Failed to start udevd", &status_fail());
+            false
         }
-
     } else if Path::new("/sbin/mdev").exists() {
-        // BusyBox mdev setup
-        let _ = fs::write("/proc/sys/kernel/hotplug", "/sbin/mdev");
-
-        if let Err(_) = Command::new("/sbin/mdev")
+        let _ = std::fs::write("/proc/sys/kernel/hotplug", "/sbin/mdev");
+        if Command::new("/sbin/mdev")
             .arg("-s")
             .stdout(Stdio::from(dev_null()))
             .stderr(Stdio::from(dev_null()))
             .status()
+            .is_ok()
         {
-            print_step("Failed to run mdev -s", &status_fail());
-        } else {
             print_step("Initialized /dev with mdev -s", &status_ok());
+            true
+        } else {
+            print_step("Failed to run mdev -s", &status_fail());
+            false
         }
-
     } else {
         print_step("No supported device manager (udevd or mdev) found", &status_fail());
+        false
+    };
+
+    // If udevd started, try to run udevadm trigger to process devices
+    if started && Path::new("/usr/bin/udevadm").exists() {
+        if Command::new("/usr/bin/udevadm")
+            .arg("trigger")
+            .stdout(Stdio::from(dev_null()))
+            .stderr(Stdio::from(dev_null()))
+            .status()
+            .is_ok()
+        {
+            print_step("Triggered udev events", &status_ok());
+        } else {
+            print_step("Failed to trigger udev events with udevadm", &status_fail());
+        }
     }
 }
-

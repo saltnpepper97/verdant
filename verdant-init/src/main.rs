@@ -3,6 +3,9 @@ mod setup;
 mod modules;
 mod handoff;
 
+use std::thread::sleep;
+use std::time::Duration;
+
 use common::verdant_banner;
 use mount::mount_essential;
 use modules::{load_modules_from_map, merge_module_configs};
@@ -12,7 +15,9 @@ use setup::*;
 fn main() {
     let os_name = get_os_name();
     verdant_banner(&os_name);
-        
+
+    sleep(Duration::from_secs(3));
+
     println!();
 
     mount_essential();
@@ -34,6 +39,8 @@ fn main() {
         common::print_step("Failed to merge kernel module configs", &common::status_fail());
         std::process::exit(1);
     }
+
+    println!();
 
     handoff_to_verdantd() 
 }
