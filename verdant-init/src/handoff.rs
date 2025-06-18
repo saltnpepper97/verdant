@@ -1,22 +1,19 @@
 use std::process::{Command, Stdio};
-use common::{print_step, status_ok, status_fail};
+use std::os::unix::process::CommandExt;
+use common::{print_info_step, print_step, status_fail};
 
-/// Launches verdantd as a subprocess. Does not replace current image.
-pub fn handoff_to_verdantd() {
-    match Command::new("/sbin/verdantd")
+/// Replaces verdant-init with verdantd
+pub fn handoff_to_verdantd() -> ! {
+    print_info_step("Handing off to /usr/sbin/verdantd");
+
+    let _ = Command::new("/usr/sbin/verdantd")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(_) => {
-            print_step("Handoff to /sbin/verdantd successful", &status_ok());
-            std::process::exit(0);
-        }
-        Err(err) => {
-            print_step(&format!("Failed to exec /sbin/verdantd: {}", err), &status_fail());
-            std::process::exit(1);
-        }
-    }
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .exec();
+
+    // Only runs if exec fails
+    print_step("Failed to exec /usr/sbin/verdantd", &status_fail());
+    std::process::exit(1);
 }
 
