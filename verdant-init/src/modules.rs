@@ -23,7 +23,6 @@ fn parse_module_line(line: &str) -> (ModuleRequirement, &str) {
 }
 
 fn load_module(module: &str, is_last: bool) -> Result<(), ()> {
-    print_substep(&format!("Loading module {}", module), &status_ok());
     io::stdout().flush().unwrap();
 
     let status = Command::new("modprobe")
