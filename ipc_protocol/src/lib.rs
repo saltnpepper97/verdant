@@ -1,14 +1,26 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use serde::{Serialize, Deserialize};
+
+pub const SOCKET_PATH: &str = "/run/verdantd.sock";
+
+#[derive(Serialize, Deserialize)]
+pub enum Request {
+    StartService { name: String },
+    StopService { name: String },
+    RestartService { name: String },
+    ReloadService { name: String },
+    ReloadAllServices,
+    Shutdown,
+    Reboot,
+    EnableModule { name: String },
+    DisableModule { name: String },
+    Status,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Response {
+    Ok,
+    Error(String),
+    StatusInfo(String),
 }
+
+
