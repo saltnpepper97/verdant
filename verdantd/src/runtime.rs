@@ -33,11 +33,12 @@ impl ManagedService {
         if let Some(child) = &mut self.child {
             match child.try_wait()? {
                 Some(status) => {
-                    print_step(
-                        &format!("Service {} exited with {:?}", self.config.name, status),
-                        &status_fail(),
-                    );
-
+                    if !status.success() {
+                        print_step(
+                            &format!("Service {} exited with {:?}", self.config.name, status),
+                            &status_fail(),
+                        );
+                    }
                     match self.config.restart {
                         RestartPolicy::Always => {
                             print_step(
