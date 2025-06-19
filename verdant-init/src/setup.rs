@@ -9,8 +9,8 @@ use common::{print_step, status_fail, status_ok, status_warn};
 /// Setup fonts before anything else in the terminal
 pub fn setup_console_font() {
     let candidates = [
-        ("/usr/share/consolefonts/lat2-Terminus16.psfu.gz", "/usr/sbin/setfont"),
-        ("/usr/share/kbd/consolefonts/lat2-Terminus16.psfu.gz", "/usr/bin/setfont"),
+        ("/usr/share/consolefonts/Lat2-Terminus16.psfu.gz", "/usr/sbin/setfont"),
+        ("/usr/share/kbd/consolefonts/Lat2-Terminus16.psfu.gz", "/usr/bin/setfont"),
     ];
 
     for (font, setfont_bin) in candidates {
