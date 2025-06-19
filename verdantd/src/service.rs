@@ -24,7 +24,9 @@ pub struct ServiceConfig {
     pub args: Option<Vec<String>>,
     pub restart: RestartPolicy,
     pub requires: Vec<String>,
+    pub after: Vec<String>,
 }
+
 
 impl ServiceConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> io::Result<Self> {
@@ -50,7 +52,9 @@ impl ServiceConfig {
         let description = map.remove("description");
         let args = map.remove("args").map(|a| a.split_whitespace().map(String::from).collect());
         let requires = map.remove("requires").map_or_else(Vec::new, |r| r.split(',').map(|s| s.trim().to_string()).collect());
-
+        let after = map.remove("after").map_or_else(Vec::new, |r| {
+            r.split(',').map(|s| s.trim().to_string()).collect()
+        });
         let restart = match map.remove("restart").as_deref() {
             Some("always") => RestartPolicy::Always,
             Some("on-failure") => RestartPolicy::OnFailure,
@@ -65,6 +69,7 @@ impl ServiceConfig {
             args,
             restart,
             requires,
+            after,
         })
     }
 }

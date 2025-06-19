@@ -28,7 +28,6 @@ fn main() {
 
     setup_lock_dir();
     setup_runtime_dirs();
-    setup_hostname();
     setup_device_manager();
 
     if let Ok(modules) = merge_module_configs() {
@@ -49,6 +48,7 @@ fn main() {
     check_root_filesystem();
 
     remount_root_rw();
+    setup_hostname();
     
     handoff_to_verdantd() 
 }

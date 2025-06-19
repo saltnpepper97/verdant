@@ -1,6 +1,4 @@
-use std::thread;
-use std::time::Duration;
-
+use std::process;
 use common::{print_step, status_ok};
 
 mod service;
@@ -13,18 +11,13 @@ use crate::runtime::ServiceManager;
 fn main() {
     print_step("verdantd started successfully", &status_ok());
 
-    // Initial service load
+    // Load and start services
     let configs = load_enabled_services();
     let mut manager = ServiceManager::new(configs);
 
     if let Err(e) = manager.run() {
         eprintln!("Error running service manager: {}", e);
-    }
-
-    // Main loop
-    loop {
-        // Eventually, here you'll supervise services, restart if needed, etc.
-        thread::sleep(Duration::from_secs(1));
+        process::exit(1);
     }
 }
 

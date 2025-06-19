@@ -53,7 +53,10 @@ pub fn mount_essential() {
         ("proc", "/proc", "proc", vec![]),
         ("sysfs", "/sys", "sysfs", vec![]),
         ("devtmpfs", "/dev", "devtmpfs", vec![]),
+        ("devpts", "/dev/pts", "devpts", vec![]),
         ("tmpfs", "/run", "tmpfs", vec!["-o", "mode=0755"]),
+        ("tmpfs", "/dev/shm", "tmpfs", vec!["-o", "mode=1777"]),
+        ("tmpfs", "/tmp", "tmpfs", vec!["-o", "mode=1777"]),
     ];
 
     let last_index = mounts.len() - 1;
