@@ -93,7 +93,7 @@ pub fn merge_module_configs() -> Result<HashMap<String, ModuleRequirement>, ()> 
 }
 
 pub fn load_modules_from_map(modules: &HashMap<String, ModuleRequirement>) -> Result<(), ()> {
-    print_info_step("Loading all kernel modules according to merged configs");
+    print_info_step("Loading all kernel modules according to merged configs ...");
     io::stdout().flush().unwrap();
 
     let len = modules.len();

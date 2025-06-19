@@ -128,30 +128,6 @@ pub fn setup_device_manager() {
     }
 }
 
-/// Remounts the root filesystem as read/write
-pub fn remount_root_rw() {
-    let status = Command::new("mount")
-        .args(&["-o", "remount,rw", "/"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    match status {
-        Ok(s) if s.success() => {
-            print_step("Remounted root filesystem as read/write", &status_ok());
-        }
-        Ok(s) => {
-            print_step(
-                &format!("mount returned non-zero status: {}", s),
-                &status_fail(),
-            );
-        }
-        Err(e) => {
-            print_step(&format!("Failed to remount root filesystem: {}", e), &status_fail());
-        }
-    }
-}
-
 /// Run fsck on the root filesystem if supported
 pub fn check_root_filesystem() {
     let status = Command::new("fsck")

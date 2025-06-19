@@ -47,7 +47,7 @@ fn mount_fs(source: &str, target: &str, fstype: &str, flags: &[&str], is_last: b
 }
 
 pub fn mount_essential() {
-    print_info_step("Mounting essential filesystems...");
+    print_info_step("Mounting essential filesystems ...");
 
     let mounts = [
         ("proc", "/proc", "proc", vec![]),
