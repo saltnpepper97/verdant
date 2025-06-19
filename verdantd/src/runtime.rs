@@ -1,4 +1,4 @@
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::io;
 use std::thread;
 use std::time::Duration;
@@ -18,11 +18,17 @@ impl ManagedService {
         Self { config, child: None }
     }
 
+
     pub fn launch(&mut self) -> io::Result<u32> {
         let mut cmd = Command::new(&self.config.exec);
         if let Some(args) = &self.config.args {
             cmd.args(args);
         }
+
+        // Redirect stdout and stderr to /dev/null to suppress output
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+
         let child = cmd.spawn()?;
         let pid = child.id();
         self.child = Some(child);
