@@ -15,8 +15,6 @@ use handoff::handoff_to_verdantd;
 use setup::*;
 
 fn main() {
-
-    setup_console_font();
     let os_name = get_os_name();
     verdant_banner(&os_name);
 
