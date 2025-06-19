@@ -6,10 +6,7 @@ use crate::service::ServiceConfig;
 pub const ENABLED_DIR: &str = "/etc/verdant/enabled";
 
 pub fn load_enabled_services() -> Vec<ServiceConfig> {
-    print_step(
-        &format!("Loading service files from '{}' ...", ENABLED_DIR),
-        &status_ok(),
-    );
+    print_info_step(&format!("Loading service files from '{}' ...", ENABLED_DIR));
 
     let mut configs = Vec::new();
 
