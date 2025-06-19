@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use nix::unistd::sethostname;
 
-use common::{print_step, status_fail, status_ok};
+use common::{print_step, status_fail, status_ok, status_warn};
 
 /// Create /run/verdant with appropriate permissions
 pub fn setup_runtime_dirs() {
@@ -162,4 +162,25 @@ pub fn check_root_filesystem() {
             print_step(&format!("Failed to run fsck on /: {}", e), &status_fail());
         }
     }
+}
+
+pub fn setup_console_font() {
+    let candidates = [
+        ("/usr/share/consolefonts/lat9w-08.psfu.gz", "/usr/bin/setfont"),
+        ("/usr/share/kbd/consolefonts/lat9w-08.psfu.gz", "/usr/bin/setfont"),
+    ];
+
+    for (font, setfont_bin) in candidates {
+        if fs::metadata(font).is_ok() && fs::metadata(setfont_bin).is_ok() {
+            if let Err(e) = Command::new(setfont_bin)
+                .arg(font)
+                .status()
+            {
+                print_step(&format!("Failed to set font using {}: {}", font, e), &status_fail());
+            }
+            return;
+        }
+    }
+
+    print_step("No valid console font found — skipping setfont", &status_warn());
 }

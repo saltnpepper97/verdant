@@ -4,6 +4,7 @@ mod modules;
 mod handoff;
 
 use std::thread::sleep;
+use std::process::Command;
 use std::time::Duration;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
@@ -15,6 +16,8 @@ use handoff::handoff_to_verdantd;
 use setup::*;
 
 fn main() {
+
+    setup_console_font();
     let os_name = get_os_name();
     verdant_banner(&os_name);
 
