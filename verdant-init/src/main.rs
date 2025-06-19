@@ -9,7 +9,7 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 
 use common::{print_step, status_ok, verdant_banner};
-use mount::mount_essential;
+use mount::{remount_root_rw, mount_essential};
 use modules::{load_modules_from_map, merge_module_configs};
 use handoff::handoff_to_verdantd;
 use setup::*;
@@ -45,6 +45,10 @@ fn main() {
     if reap_zombies() {
         print_step("Reaped zombie processes", &status_ok());
     }
+
+    check_root_filesystem();
+
+    remount_root_rw();
     
     handoff_to_verdantd() 
 }

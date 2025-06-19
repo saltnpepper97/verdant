@@ -128,9 +128,9 @@ pub fn load_modules_from_map(modules: &HashMap<String, ModuleRequirement>) -> Re
                     return Err(());
                 } else {
                     if is_last {
-                        print_substep_last(&format!("Optional module {} failed to load, continuing.", module), &status_fail());
+                        print_substep_last(&format!("Optional module {} failed to load.", module), &status_fail());
                     } else {
-                        print_substep(&format!("Optional module {} failed to load, continuing.", module), &status_fail());
+                        print_substep(&format!("Optional module {} failed to load.", module), &status_fail());
                     }
                 }
             }

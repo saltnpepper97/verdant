@@ -1,7 +1,7 @@
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use common::{print_info_step, print_substep, print_substep_last, status_ok, status_skip, status_fail};
+use common::{print_step, print_info_step, print_substep, print_substep_last, status_ok, status_skip, status_fail};
 
 fn is_mounted(target: &str) -> bool {
     if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
@@ -65,4 +65,26 @@ pub fn mount_essential() {
     }
 }
 
+/// Remounts the root filesystem as read/write
+pub fn remount_root_rw() {
+    let status = Command::new("mount")
+        .args(&["-o", "remount,rw", "/"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 
+    match status {
+        Ok(s) if s.success() => {
+            print_step("Remounted root filesystem as read/write", &status_ok());
+        }
+        Ok(s) => {
+            print_step(
+                &format!("mount returned non-zero status: {}", s),
+                &status_fail(),
+            );
+        }
+        Err(e) => {
+            print_step(&format!("Failed to remount root filesystem: {}", e), &status_fail());
+        }
+    }
+}
