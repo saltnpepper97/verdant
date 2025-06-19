@@ -50,7 +50,11 @@ impl ServiceConfig {
         let name = map.remove("name").ok_or_else(|| Error::new(ErrorKind::InvalidData, "Missing 'name'"))?;
         let exec = map.remove("exec").ok_or_else(|| Error::new(ErrorKind::InvalidData, "Missing 'exec'"))?;
         let description = map.remove("description");
-        let args = map.remove("args").map(|a| a.split_whitespace().map(String::from).collect());
+        let args = map.remove("args").map(|a| {
+            shell_words::split(&a).map_err(|e| {
+                Error::new(ErrorKind::InvalidData, format!("Failed to parse args: {}", e))
+            })
+        }).transpose()?;
         let requires = map.remove("requires").map_or_else(Vec::new, |r| r.split(',').map(|s| s.trim().to_string()).collect());
         let after = map.remove("after").map_or_else(Vec::new, |r| {
             r.split(',').map(|s| s.trim().to_string()).collect()

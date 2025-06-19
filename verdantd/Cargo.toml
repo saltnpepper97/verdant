@@ -9,5 +9,6 @@ ipc_protocol = { path = "../ipc_protocol" }
 nix = { version = "0.30.1", features = [ "process", "signal", "mount" ] }
 serde = { version = "1.0", features = [ "derive" ] }
 serde_json = "1.0.140"
+shell-words = "1.1.0"
 signal-hook = "0.3.18"
 tokio = { version = "1.45.1", features = [ "full" ] }
