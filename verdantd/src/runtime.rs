@@ -18,7 +18,6 @@ impl ManagedService {
         Self { config, child: None }
     }
 
-    // Launch returns PID but does not print
     pub fn launch(&mut self) -> io::Result<u32> {
         let mut cmd = Command::new(&self.config.exec);
         if let Some(args) = &self.config.args {
@@ -45,7 +44,7 @@ impl ManagedService {
                                 &format!("Restarting service {} (policy: always)", self.config.name),
                                 &status_ok(),
                             );
-                            self.launch()?; // You might want to handle printing here too, but up to you
+                            self.launch()?;
                         }
                         RestartPolicy::OnFailure if !status.success() => {
                             print_step(
@@ -62,7 +61,6 @@ impl ManagedService {
                 None => {}
             }
         } else {
-            // Service not started yet; launch it
             self.launch()?;
         }
         Ok(())
@@ -80,23 +78,34 @@ impl ServiceManager {
             name_to_config.insert(config.name.clone(), config);
         }
 
-        // Build dependency graph
-        let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
-
+        // Validate `requires` dependencies
         for (name, config) in &name_to_config {
-            let mut deps = HashSet::new();
-
             for req in &config.requires {
-                deps.insert(req.clone());
+                if !name_to_config.contains_key(req) {
+                    panic!("Service '{}' requires missing service '{}'", name, req);
+                }
             }
-            for after in &config.after {
-                deps.insert(after.clone());
-            }
-
-            graph.insert(name.clone(), deps);
         }
 
-        // Topological sort
+        // Build dependency graph for topological sort
+        // This graph is directed: edges point from dependency -> dependent service
+        let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+
+        // Initialize graph nodes with empty sets
+        for name in name_to_config.keys() {
+            graph.insert(name.clone(), HashSet::new());
+        }
+
+        // For each service, for each dependency, add edge from dependency to service
+        for (name, config) in &name_to_config {
+            for dep in config.requires.iter().chain(config.after.iter()) {
+                if name_to_config.contains_key(dep) {
+                    graph.get_mut(dep).unwrap().insert(name.clone());
+                }
+            }
+        }
+
+        // Sort services topologically
         let sorted = match topological_sort(&graph) {
             Ok(sorted) => sorted,
             Err(cycle) => panic!("Cycle detected in service dependencies: {:?}", cycle),
@@ -114,7 +123,6 @@ impl ServiceManager {
     pub fn run(&mut self) -> io::Result<()> {
         let last_index = self.services.len().saturating_sub(1);
 
-        // Launch all services first with proper printing
         for (i, svc) in self.services.iter_mut().enumerate() {
             let pid = svc.launch()?;
             if i == last_index {
@@ -130,7 +138,6 @@ impl ServiceManager {
             }
         }
 
-        // Supervise services in a loop
         loop {
             for svc in self.services.iter_mut() {
                 svc.supervise()?;
@@ -140,13 +147,12 @@ impl ServiceManager {
     }
 }
 
+// Topological sort using Kahn's algorithm
 fn topological_sort(graph: &HashMap<String, HashSet<String>>) -> Result<Vec<String>, Vec<String>> {
-    let mut in_degree = HashMap::new();
-    let mut result = Vec::new();
-
-    for node in graph.keys() {
-        in_degree.insert(node.clone(), 0);
-    }
+    let mut in_degree: HashMap<String, usize> = graph
+        .keys()
+        .map(|k| (k.clone(), 0))
+        .collect();
 
     for deps in graph.values() {
         for dep in deps {
@@ -161,15 +167,16 @@ fn topological_sort(graph: &HashMap<String, HashSet<String>>) -> Result<Vec<Stri
         .filter_map(|(k, &v)| if v == 0 { Some(k.clone()) } else { None })
         .collect();
 
+    let mut result = Vec::new();
+
     while let Some(node) = queue.pop_front() {
         result.push(node.clone());
-        if let Some(dependents) = graph.get(&node) {
-            for dep in dependents {
-                if let Some(count) = in_degree.get_mut(dep) {
-                    *count -= 1;
-                    if *count == 0 {
-                        queue.push_back(dep.clone());
-                    }
+
+        for neighbor in graph.get(&node).unwrap_or(&HashSet::new()) {
+            if let Some(count) = in_degree.get_mut(neighbor) {
+                *count -= 1;
+                if *count == 0 {
+                    queue.push_back(neighbor.clone());
                 }
             }
         }
@@ -178,8 +185,7 @@ fn topological_sort(graph: &HashMap<String, HashSet<String>>) -> Result<Vec<Stri
     if result.len() == graph.len() {
         Ok(result)
     } else {
-        // cycle detected
-        let cycle_nodes: Vec<String> = in_degree
+        let cycle_nodes = in_degree
             .into_iter()
             .filter(|(_, v)| *v > 0)
             .map(|(k, _)| k)
