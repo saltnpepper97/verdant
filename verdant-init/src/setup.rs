@@ -2,6 +2,7 @@ use std::fs::{self, Permissions, File};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use nix::unistd::sethostname;
 
 use common::{print_step, status_fail, status_ok};
 
@@ -30,13 +31,20 @@ pub fn setup_lock_dir() {
 }
 
 pub fn setup_hostname() {
-    match fs::read_to_string("/proc/sys/kernel/hostname") {
-        Ok(hostname) => {
-            let hostname = hostname.trim();
-            print_step(&format!("Hostname set to: {}", hostname), &status_ok());
+    match fs::read_to_string("/etc/hostname") {
+        Ok(contents) => {
+            let hostname = contents.trim(); // strip newline if present
+            match sethostname(hostname) {
+                Ok(_) => {
+                    print_step(&format!("Hostname set to: {}", hostname), &status_ok());
+                }
+                Err(e) => {
+                    print_step(&format!("Failed to set hostname: {}", e), &status_fail());
+                }
+            }
         }
         Err(e) => {
-            print_step(&format!("Failed to read hostname: {}", e), &status_fail());
+            print_step(&format!("Failed to read /etc/hostname: {}", e), &status_fail());
         }
     }
 }

@@ -121,9 +121,9 @@ pub fn load_modules_from_map(modules: &HashMap<String, ModuleRequirement>) -> Re
             Err(()) => {
                 if *requirement == ModuleRequirement::Required {
                     if is_last {
-                        print_substep_last(&format!("Required module {} failed to load, aborting.", module), &status_fail());
+                        print_substep_last(&format!("Required module {} failed to load.", module), &status_fail());
                     } else {
-                        print_substep(&format!("Required module {} failed to load, aborting.", module), &status_fail());
+                        print_substep(&format!("Required module {} failed to load.", module), &status_fail());
                     }
                     return Err(());
                 } else {
