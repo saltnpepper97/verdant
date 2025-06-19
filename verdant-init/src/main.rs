@@ -4,7 +4,6 @@ mod modules;
 mod handoff;
 
 use std::thread::sleep;
-use std::process::Command;
 use std::time::Duration;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
