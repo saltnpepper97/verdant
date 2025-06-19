@@ -23,7 +23,7 @@ impl ManagedService {
         if let Some(args) = &self.config.args {
             cmd.args(args);
         }
-        let mut child = cmd.spawn()?;
+        let child = cmd.spawn()?;
         let pid = child.id();
         self.child = Some(child);
         Ok(pid)
