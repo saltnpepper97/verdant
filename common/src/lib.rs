@@ -24,21 +24,21 @@ pub fn status_warn() -> String {
 
 /// Printing functions
 pub fn print_step(label: &str, status: &str) {
-    println!("• {:<60}{}", label, status);
+    println!("• {:<80}{}", label, status);
 }
 
 pub fn print_info_step(label: &str) {
-    println!("• {:<60}", label);
+    println!("• {:<80}", label);
 }
 
 pub fn print_substep(label: &str, status: &str) {
     // For middle substeps, use ├─
-    println!("  ├─ {:<57}{}", label, status);
+    println!("  ├─ {:<77}{}", label, status);
 }
 
 pub fn print_substep_last(label: &str, status: &str) {
     // For last substep, use └─
-    println!("  └─ {:<57}{}", label, status);
+    println!("  └─ {:<77}{}", label, status);
 }
 
 pub fn print_boot_step(label: &str) {
