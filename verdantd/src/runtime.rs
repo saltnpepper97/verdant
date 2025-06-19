@@ -78,17 +78,21 @@ impl ServiceManager {
             name_to_config.insert(config.name.clone(), config);
         }
 
-        // Validate `requires` dependencies
+        // Validate `requires` dependencies, but just print errors instead of panic
         for (name, config) in &name_to_config {
             for req in &config.requires {
                 if !name_to_config.contains_key(req) {
-                    panic!("Service '{}' requires missing service '{}'", name, req);
+                    print_step(
+                        &format!("Error: Service '{}' requires missing service '{}'", name, req),
+                        &status_fail(),
+                    );
+                    // Don't panic, just continue
                 }
             }
         }
 
         // Build dependency graph for topological sort
-        // This graph is directed: edges point from dependency -> dependent service
+        // Edges point from dependency -> dependent service
         let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
 
         // Initialize graph nodes with empty sets
@@ -96,11 +100,17 @@ impl ServiceManager {
             graph.insert(name.clone(), HashSet::new());
         }
 
-        // For each service, for each dependency, add edge from dependency to service
+        // For each service, for each dependency, add edge from dependency to service,
+        // but only if the dependency exists
         for (name, config) in &name_to_config {
             for dep in config.requires.iter().chain(config.after.iter()) {
                 if name_to_config.contains_key(dep) {
                     graph.get_mut(dep).unwrap().insert(name.clone());
+                } else {
+                    print_step(
+                        &format!("Warning: Service '{}' has dependency '{}' which does not exist", name, dep),
+                        &status_fail(),
+                    );
                 }
             }
         }
@@ -108,7 +118,14 @@ impl ServiceManager {
         // Sort services topologically
         let sorted = match topological_sort(&graph) {
             Ok(sorted) => sorted,
-            Err(cycle) => panic!("Cycle detected in service dependencies: {:?}", cycle),
+            Err(cycle) => {
+                print_step(
+                    &format!("Cycle detected in service dependencies: {:?}", cycle),
+                    &status_fail(),
+                );
+                // If cycle detected, fallback to original order ignoring dependencies
+                name_to_config.keys().cloned().collect()
+            }
         };
 
         let services = sorted
