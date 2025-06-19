@@ -146,11 +146,11 @@ pub fn check_root_filesystem() {
 
     match status {
         Ok(s) if s.success() => {
-            print_step("Filesystem check on '/' completed successfully", &status_ok());
+            print_step("Filesystem check on '/' completed with no errors", &status_ok());
         }
         Ok(s) if s.code() == Some(1) => {
             // 1 = filesystem errors corrected
-            print_step("Filesystem check on '/' errors corrected", &status_ok());
+            print_step("Filesystem check on '/' found and corrected errors", &status_ok());
         }
         Ok(s) => {
             print_step(
