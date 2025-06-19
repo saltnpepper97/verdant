@@ -61,7 +61,9 @@ impl ManagedService {
                 None => {}
             }
         } else {
-            self.launch()?;
+            if matches!(self.config.restart, RestartPolicy::Always) {
+                self.launch()?;
+            }
         }
         Ok(())
     }
@@ -210,4 +212,3 @@ fn topological_sort(graph: &HashMap<String, HashSet<String>>) -> Result<Vec<Stri
         Err(cycle_nodes)
     }
 }
-
