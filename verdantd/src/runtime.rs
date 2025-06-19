@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use common::{print_step, print_substep, print_substep_last, status_fail, status_ok};
+use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
 
 use crate::service::{ServiceConfig, RestartPolicy};
 
@@ -81,44 +81,52 @@ impl ServiceManager {
             name_to_config.insert(config.name.clone(), config);
         }
 
-        // Validate `requires` dependencies, but just print errors instead of panic
+        // Collect services that have missing required dependencies
+        let mut services_with_missing_deps = HashSet::new();
+
         for (name, config) in &name_to_config {
             for req in &config.requires {
                 if !name_to_config.contains_key(req) {
+                    services_with_missing_deps.insert(name.clone());
+                }
+            }
+        }
+
+        for (name, config) in &name_to_config {
+            for dep in config.requires.iter().chain(config.after.iter()) {
+                if !name_to_config.contains_key(dep) {
                     print_step(
-                        &format!("Error: Service '{}' requires missing service '{}'", name, req),
-                        &status_fail(),
+                        &format!("Service '{}' did not start. Missing dependency: '{}'", name, dep),
+                        &status_warn(),
                     );
-                    // Don't panic, just continue
+                    services_with_missing_deps.insert(name.clone());
                 }
             }
         }
 
         // Build dependency graph for topological sort
-        // Edges point from dependency -> dependent service
+        // Only include services WITHOUT missing dependencies
         let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
 
-        // Initialize graph nodes with empty sets
         for name in name_to_config.keys() {
-            graph.insert(name.clone(), HashSet::new());
+            if !services_with_missing_deps.contains(name) {
+                graph.insert(name.clone(), HashSet::new());
+            }
         }
 
-        // For each service, for each dependency, add edge from dependency to service,
-        // but only if the dependency exists
         for (name, config) in &name_to_config {
+            if services_with_missing_deps.contains(name) {
+                continue; // skip those with missing deps
+            }
             for dep in config.requires.iter().chain(config.after.iter()) {
-                if name_to_config.contains_key(dep) {
-                    graph.get_mut(dep).unwrap().insert(name.clone());
-                } else {
-                    print_step(
-                        &format!("Warning: Service '{}' has dependency '{}' which does not exist", name, dep),
-                        &status_fail(),
-                    );
+                if !services_with_missing_deps.contains(dep) {
+                    if graph.contains_key(dep) {
+                        graph.get_mut(dep).unwrap().insert(name.clone());
+                    }
                 }
             }
         }
 
-        // Sort services topologically
         let sorted = match topological_sort(&graph) {
             Ok(sorted) => sorted,
             Err(cycle) => {
@@ -126,10 +134,15 @@ impl ServiceManager {
                     &format!("Cycle detected in service dependencies: {:?}", cycle),
                     &status_fail(),
                 );
-                // If cycle detected, fallback to original order ignoring dependencies
-                name_to_config.keys().cloned().collect()
+                // fallback to original order ignoring dependencies but skipping missing dep services
+                graph.keys().cloned().collect()
             }
         };
+
+        // Remove missing dep services from the map and keep only sorted services
+        for missing in &services_with_missing_deps {
+            name_to_config.remove(missing);
+        }
 
         let services = sorted
             .into_iter()

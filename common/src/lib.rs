@@ -18,6 +18,10 @@ pub fn status_skip() -> String {
     format!("{YELLOW_BOLD}[SKIP]{RESET}")
 }
 
+pub fn status_warn() -> String {
+    format!("{YELLOW_BOLD}[WARN]{RESET}")
+}
+
 /// Printing functions
 pub fn print_step(label: &str, status: &str) {
     println!("• {:<60}{}", label, status);
