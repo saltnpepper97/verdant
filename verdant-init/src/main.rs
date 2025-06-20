@@ -20,7 +20,7 @@ fn main() {
     let os_name = get_os_name();
     verdant_banner(&os_name);
 
-    sleep(Duration::from_secs(3));
+    sleep(Duration::from_secs(1));
 
     println!();
 
