@@ -14,9 +14,9 @@
 
 ## Components
 
-- **`verdant-init`** – The PID 1 binary. Mounts `/proc`, `/dev`, `/sys`, `/tmp`, sets the hostname, and loads kernel modules.
+- **`init`** – The PID 1 binary. Mounts `/proc`, `/dev`, `/sys`, `/tmp`, sets the hostname, and loads kernel modules.
 - **`verdantd`** – The service supervisor. Manages long-running daemons defined via `.vs` files.
-- **`verdantctl`** – Command-line interface for starting, stopping, reloading, and inspecting services.
+- **`vctl`** – Command-line interface for starting, stopping, reloading, and inspecting services.
 
 ## Status
 
