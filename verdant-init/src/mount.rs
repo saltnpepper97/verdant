@@ -11,28 +11,6 @@ fn is_mounted(target: &str) -> bool {
     }
 }
 
-fn find_all_block_devices() -> Vec<String> {
-    let mut devices = Vec::new();
-
-    if let Ok(entries) = fs::read_dir("/dev") {
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-
-            // Match known block device patterns (skip loop, ram, etc.)
-            if name.starts_with("sd") || name.starts_with("vd") || name.starts_with("nvme") {
-                // Skip whole disks (like sda or nvme0n1) — only try partitions
-                if name.chars().any(|c| c.is_digit(10)) {
-                    let path = format!("/dev/{}", name);
-                    devices.push(path);
-                }
-            }
-        }
-    }
-
-    devices
-}
-
 fn mount_fs(source: &str, target: &str, fstype: &str, flags: &[&str], is_last: bool) -> Result<(), String> {
     if is_mounted(target) {
         if is_last {
