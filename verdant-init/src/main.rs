@@ -15,6 +15,11 @@ use handoff::handoff_to_verdantd;
 use setup::*;
 
 fn main() {
+    // PID 1 check
+    if nix::unistd::getpid().as_raw() != 1 {
+        eprintln!("Error: verdant-init must be run as PID 1.");
+        std::process::exit(1);
+    }
     wait_for_framebuffer(3);
 
     let os_name = get_os_name();
