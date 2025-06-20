@@ -91,6 +91,8 @@ pub fn shutdown_or_reboot(services: &mut [ManagedService], action: SystemAction)
         eprintln!("/proc/sysrq-trigger write failed: {:?}", sysrq_result);
     }
 
+    let _ = std::fs::remove_file("/run/verdantd.sock");
+
     let cmd = match action {
         SystemAction::Reboot => "reboot",
         SystemAction::Shutdown => "poweroff",
