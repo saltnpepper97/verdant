@@ -6,8 +6,8 @@ use ipc_protocol::{Request, Response, SOCKET_PATH};
 use serde_json;
 
 #[derive(Parser)]
-#[command(name = "verdantctl")]
-#[command(about = "Command-line tool to interact with verdantd")]
+#[command(name = "vctl")]
+#[command(about = "Command-line tool to interact with verdant")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -88,9 +88,9 @@ fn main() {
     };
 
     match send_request(&request) {
-        Ok(Response::Ok) => println!("Success: {}", action_description),
+        Ok(Response::Ok) => println!("{}", action_description),
         Ok(Response::StatusInfo(info)) => println!("{}", info),
-        Ok(Response::Error(e)) => eprintln!("Failed to {}: {}", action_description.to_lowercase(), e),
+        Ok(Response::Error(e)) => eprintln!("Failed: {}: {}", action_description.to_lowercase(), e),
         Err(e) => eprintln!("Failed to communicate with verdantd: {}", e),
     }
 }
