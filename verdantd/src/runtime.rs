@@ -188,7 +188,8 @@ impl ServiceManager {
             let result = Command::new(cmd).args(args).spawn();
 
             if let Ok(_child) = result {
-                return Command::new(cmd).args(args).spawn().map(|_| ());
+                print_step("Reboot/shutdown command started; exiting.", &status_ok());
+                std::process::exit(0);
             } else {
                 eprintln!("Failed to execute command: {}", cmd_str);
             }
