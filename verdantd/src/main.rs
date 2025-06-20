@@ -8,7 +8,6 @@ use crate::runtime::{ServiceManager, SystemAction};
 use crate::ipc::start_ipc_listener;
 use crate::loader::load_enabled_services;
 use common::{print_step, status_ok};
-use ipc_protocol;
 
 fn main() {
     print_step("verdantd started successfully", &status_ok());

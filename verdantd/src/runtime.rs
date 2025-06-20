@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::Receiver;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::process::Stdio;
 
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
@@ -31,10 +31,38 @@ impl ManagedService {
             cmd.args(args);
         }
 
-        // Open /dev/null once, then clone the handle for stdout and stderr
-        let devnull = File::open("/dev/null")?;
-        cmd.stdout(Stdio::from(devnull.try_clone()?));
-        cmd.stderr(Stdio::from(devnull));
+        if self.config.requires_tty {
+            // For tty services, open the tty device file and connect stdio
+            // Use the last argument (the tty device) as the path for simplicity:
+            let empty = "".to_string();
+            let tty_path = self
+                .config
+                .args
+                .as_ref()
+                .and_then(|args| args.last())
+                .unwrap_or(&empty);
+
+            if tty_path.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TTY service missing tty device path in args",
+                ));
+            }
+
+            let tty = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tty_path)?;
+
+            cmd.stdin(Stdio::from(tty.try_clone()?));
+            cmd.stdout(Stdio::from(tty.try_clone()?));
+            cmd.stderr(Stdio::from(tty));
+        } else {
+            // For normal services, suppress output by redirecting to /dev/null
+            let devnull = File::open("/dev/null")?;
+            cmd.stdout(Stdio::from(devnull.try_clone()?));
+            cmd.stderr(Stdio::from(devnull));
+        }
 
         let child = cmd.spawn()?;
         let pid = child.id();

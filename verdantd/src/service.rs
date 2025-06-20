@@ -25,6 +25,7 @@ pub struct ServiceConfig {
     pub restart: RestartPolicy,
     pub requires: Vec<String>,
     pub after: Vec<String>,
+    pub requires_tty: bool,
 }
 
 
@@ -66,6 +67,17 @@ impl ServiceConfig {
             Some(other) => return Err(Error::new(ErrorKind::InvalidData, format!("Unknown restart policy: {}", other))),
         };
 
+        let requires_tty = match map.remove("requires_tty").as_deref() {
+            Some("true") | Some("yes") | Some("1") => true,
+            Some("false") | Some("no") | Some("0") | None => false,
+            Some(other) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid value for requires_tty: {}", other),
+                ));
+            }
+        };
+
         Ok(ServiceConfig {
             name,
             description,
@@ -74,6 +86,7 @@ impl ServiceConfig {
             restart,
             requires,
             after,
+            requires_tty
         })
     }
 }
