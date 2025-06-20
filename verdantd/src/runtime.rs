@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::process::CommandExt; 
 use std::process::Stdio;
 use libc;
+use std::ffi::CString;
 
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
 use crate::service::{ServiceConfig, RestartPolicy};
@@ -58,8 +59,12 @@ unsafe {
             return Err(std::io::Error::last_os_error());
         }
 
+        // Convert Rust String to C-compatible CString
+        let cstr = CString::new(tty_path.clone())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "TTY path contained null byte"))?;
+
         // Re-open TTY to get FD
-        let fd = libc::open(tty_path.as_ptr() as *const i8, libc::O_RDWR);
+        let fd = libc::open(cstr.as_ptr(), libc::O_RDWR);
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
