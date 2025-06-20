@@ -5,13 +5,11 @@ use std::time::{Duration, Instant};
 use std::sync::mpsc::Receiver;
 use std::collections::{HashMap, HashSet};
 
+
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
 use crate::service::{ServiceConfig};
 use crate::managed_service::ManagedService;
 use crate::sort::topological_sort;
-
-// For reboot syscall
-use libc::{c_void, syscall, SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_POWER_OFF};
 
 pub enum SystemAction {
     Reboot,
@@ -134,24 +132,6 @@ impl ServiceManager {
         Ok(())
     }
 
-fn call_reboot_syscall(&self, cmd: i32) -> io::Result<()> {
-    let res = unsafe {
-        syscall(
-            SYS_reboot,
-            LINUX_REBOOT_MAGIC1,
-            LINUX_REBOOT_MAGIC2,
-            cmd,
-            std::ptr::null::<c_void>(),
-        )
-    };
-
-    if res != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
-}
-
     pub fn shutdown_or_reboot(&mut self, action: SystemAction) -> io::Result<()> {
         print_step("Stopping all services...", &status_ok());
 
@@ -207,16 +187,63 @@ fn call_reboot_syscall(&self, cmd: i32) -> io::Result<()> {
         let _ = Command::new("sync").status();
         thread::sleep(Duration::from_secs(1));
 
-        match action {
-            SystemAction::Reboot => {
-                print_step("Calling kernel reboot syscall...", &status_ok());
-                self.call_reboot_syscall(LINUX_REBOOT_CMD_RESTART)
-            }
-            SystemAction::Shutdown => {
-                print_step("Calling kernel poweroff syscall...", &status_ok());
-                self.call_reboot_syscall(LINUX_REBOOT_CMD_POWER_OFF)
+        print_step("Attempting to perform system action...", &status_ok());
+
+        // Attempt to use libc reboot syscall
+        #[cfg(target_os = "linux")]
+        {
+            use libc::{reboot, sync, RB_AUTOBOOT, RB_POWER_OFF};
+            unsafe { sync(); }
+
+            let result = unsafe {
+                match action {
+                    SystemAction::Reboot => reboot(RB_AUTOBOOT),
+                    SystemAction::Shutdown => reboot(RB_POWER_OFF),
+                }
+            };
+
+            if result == 0 {
+                return Ok(());
+            } else {
+                eprintln!("libc reboot syscall failed (not running as PID 1 or missing CAP_SYS_BOOT?)");
             }
         }
+
+        // Try writing to /proc/sysrq-trigger
+        let sysrq_result = std::fs::write(
+            "/proc/sysrq-trigger",
+            match action {
+                SystemAction::Reboot => "b",
+                SystemAction::Shutdown => "o",
+            },
+        );
+
+        if sysrq_result.is_ok() {
+            return Ok(());
+        } else {
+            eprintln!("/proc/sysrq-trigger write failed: {:?}", sysrq_result);
+        }
+
+        // Fallback to executing system command
+        let cmd = match action {
+            SystemAction::Reboot => "reboot",
+            SystemAction::Shutdown => "poweroff",
+        };
+
+        print_step(&format!("Fallback: Executing system command: {}", cmd), &status_warn());
+
+        let status = Command::new(cmd)
+            .status()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to execute {}: {}", cmd, e)))?;
+
+        if !status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("{} command failed with status: {:?}", cmd, status.code()),
+            ));
+        }
+
+        Ok(())
     }
 }
 
