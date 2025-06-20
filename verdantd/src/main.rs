@@ -4,6 +4,7 @@ mod managed_service;
 mod service;
 mod loader;
 mod sort;
+mod signal;
 
 use std::sync::mpsc::channel;
 use crate::runtime::{ServiceManager, SystemAction};

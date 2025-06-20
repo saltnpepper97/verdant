@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 use std::sync::mpsc::Receiver;
 use std::collections::{HashMap, HashSet};
 
-
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
 use crate::service::{ServiceConfig};
 use crate::managed_service::ManagedService;
 use crate::sort::topological_sort;
+use crate::signal::spawn_signal_listener;
 
 pub enum SystemAction {
     Reboot,
@@ -95,6 +95,9 @@ impl ServiceManager {
     pub fn run_with_ipc(&mut self, rx: Receiver<SystemAction>) -> io::Result<()> {
         print_step("Launching services...", &status_ok());
 
+        let (tx, rx_main) = std::sync::mpsc::channel();
+        spawn_signal_listener(tx.clone());
+
         let total = self.services.len();
         for (i, svc) in self.services.iter_mut().enumerate() {
             let pid = svc.launch()?;
@@ -111,6 +114,7 @@ impl ServiceManager {
                 svc.supervise()?;
             }
 
+            // Check IPC channel
             if let Ok(action) = rx.try_recv() {
                 match action {
                     SystemAction::Reboot => {
@@ -126,9 +130,24 @@ impl ServiceManager {
                 }
             }
 
+            // Check signal listener channel
+            if let Ok(action) = rx_main.try_recv() {
+                match action {
+                    SystemAction::Reboot => {
+                        print_step("Received reboot command via signal", &status_ok());
+                        self.shutdown_or_reboot(SystemAction::Reboot)?;
+                        break;
+                    }
+                    SystemAction::Shutdown => {
+                        print_step("Received shutdown command via signal", &status_ok());
+                        self.shutdown_or_reboot(SystemAction::Shutdown)?;
+                        break;
+                    }
+                }
+            }
+
             thread::sleep(Duration::from_secs(1));
         }
-
         Ok(())
     }
 
