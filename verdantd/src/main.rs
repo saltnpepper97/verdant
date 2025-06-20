@@ -1,7 +1,9 @@
 mod runtime;
 mod ipc;
+mod managed_service;
 mod service;
 mod loader;
+mod sort;
 
 use std::sync::mpsc::channel;
 use crate::runtime::{ServiceManager, SystemAction};

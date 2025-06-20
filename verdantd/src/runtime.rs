@@ -1,119 +1,18 @@
-use std::process::{Child, Command};
+use std::process::Command;
 use std::io;
 use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::Receiver;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
-use std::process::Stdio;
+use std::collections::{HashMap, HashSet};
 
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
-use crate::service::{ServiceConfig, RestartPolicy};
-
-pub struct ManagedService {
-    pub config: ServiceConfig,
-    pub child: Option<Child>,
-}
+use crate::service::ServiceConfig;
+use crate::managed_service::ManagedService;
+use crate::sort::topological_sort;
 
 pub enum SystemAction {
     Reboot,
     Shutdown,
-}
-
-impl ManagedService {
-    pub fn new(config: ServiceConfig) -> Self {
-        Self { config, child: None }
-    }
-
-
-pub fn launch(&mut self) -> io::Result<u32> {
-    let mut cmd = Command::new(&self.config.exec);
-    if let Some(args) = &self.config.args {
-        cmd.args(args);
-    }
-
-    if let Some(tty_path) = &self.config.tty {
-        use std::os::unix::io::AsRawFd;
-        use std::os::unix::process::CommandExt;
-        use std::fs::OpenOptions;
-        use libc::{self, setsid, ioctl, TIOCSCTTY};
-
-        let tty = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tty_path)?;
-
-        let tty_fd = tty.as_raw_fd();
-
-        // Safety: we're in a pre-exec closure so it's okay to call these
-        unsafe {
-            cmd.stdin(Stdio::from(tty.try_clone()?));
-            cmd.stdout(Stdio::from(tty.try_clone()?));
-            cmd.stderr(Stdio::from(tty));
-
-            cmd.pre_exec(move || {
-                if setsid() == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-
-                if ioctl(tty_fd, TIOCSCTTY, 1) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-
-                Ok(())
-            });
-        }
-    } else {
-        // Default: redirect output to /dev/null
-        let devnull = File::open("/dev/null")?;
-        cmd.stdout(Stdio::from(devnull.try_clone()?));
-        cmd.stderr(Stdio::from(devnull));
-    }
-
-    let child = cmd.spawn()?;
-    let pid = child.id();
-    self.child = Some(child);
-    Ok(pid)
-}
-
-
-    pub fn supervise(&mut self) -> io::Result<()> {
-        if let Some(child) = &mut self.child {
-            match child.try_wait()? {
-                Some(status) => {
-                    if !status.success() {
-                        print_step(
-                            &format!("Service {} exited with {:?}", self.config.name, status),
-                            &status_fail(),
-                        );
-                    }
-                    match self.config.restart {
-                        RestartPolicy::Always => {
-                            print_step(
-                                &format!("Restarting service {} (policy: always)", self.config.name),
-                                &status_ok(),
-                            );
-                            self.launch()?;
-                        }
-                        RestartPolicy::OnFailure if !status.success() => {
-                            print_step(
-                                &format!("Restarting service {} (policy: on-failure)", self.config.name),
-                                &status_ok(),
-                            );
-                            self.launch()?;
-                        }
-                        RestartPolicy::Never | RestartPolicy::OnFailure => {
-                            self.child = None;
-                        }
-                    }
-                }
-                None => {}
-            }
-        } else if matches!(self.config.restart, RestartPolicy::Always) {
-            self.launch()?;
-        }
-        Ok(())
-    }
 }
 
 pub struct ServiceManager {
@@ -273,63 +172,31 @@ impl ServiceManager {
 
         print_step("All services stopped.", &status_ok());
 
-        let cmd = match action {
-            SystemAction::Reboot => "reboot",
-            SystemAction::Shutdown => "poweroff",
+        print_step("Syncing disks before shutdown/reboot...", &status_ok());
+        let _ = Command::new("sync").status();
+
+        let candidates = match action {
+            SystemAction::Reboot => vec!["/sbin/reboot", "/bin/reboot", "reboot", "systemctl reboot", "shutdown -r now", "halt -f"],
+            SystemAction::Shutdown => vec!["/sbin/poweroff", "/bin/poweroff", "poweroff", "systemctl poweroff", "shutdown -h now", "halt -f"],
         };
 
-        print_step(&format!("Executing system command: {}", cmd), &status_ok());
+        for cmd_str in candidates {
+            let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+            let (cmd, args) = parts.split_first().unwrap();
 
-        Command::new(cmd)
-            .spawn()
-            .map(|_| ())
-            .or_else(|e| Err(io::Error::new(io::ErrorKind::Other, format!("Failed to execute {}: {}", cmd, e))))
+            print_step(&format!("Trying: {} {:?}", cmd, args), &status_ok());
+            let result = Command::new(cmd).args(args).spawn();
+
+            if let Ok(mut child) = result {
+                let _ = child.wait();
+                return Ok(());
+            } else {
+                eprintln!("Failed to execute command: {}", cmd_str);
+            }
+        }
+
+        Err(io::Error::new(io::ErrorKind::Other, "All shutdown/reboot attempts failed"))
     }
 }
 
-fn topological_sort(graph: &HashMap<String, HashSet<String>>) -> Result<Vec<String>, Vec<String>> {
-    let mut in_degree: HashMap<String, usize> = graph
-        .keys()
-        .map(|k| (k.clone(), 0))
-        .collect();
-
-    for deps in graph.values() {
-        for dep in deps {
-            if let Some(count) = in_degree.get_mut(dep) {
-                *count += 1;
-            }
-        }
-    }
-
-    let mut queue: VecDeque<String> = in_degree
-        .iter()
-        .filter_map(|(k, &v)| if v == 0 { Some(k.clone()) } else { None })
-        .collect();
-
-    let mut result = Vec::new();
-
-    while let Some(node) = queue.pop_front() {
-        result.push(node.clone());
-
-        for neighbor in graph.get(&node).unwrap_or(&HashSet::new()) {
-            if let Some(count) = in_degree.get_mut(neighbor) {
-                *count -= 1;
-                if *count == 0 {
-                    queue.push_back(neighbor.clone());
-                }
-            }
-        }
-    }
-
-    if result.len() == graph.len() {
-        Ok(result)
-    } else {
-        let cycle_nodes = in_degree
-            .into_iter()
-            .filter(|(_, v)| *v > 0)
-            .map(|(k, _)| k)
-            .collect();
-        Err(cycle_nodes)
-    }
-}
 
