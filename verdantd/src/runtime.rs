@@ -1,12 +1,13 @@
 use std::process::Command;
 use std::io;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::sync::mpsc::Receiver;
 use std::collections::{HashMap, HashSet};
 
+
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
-use crate::service::ServiceConfig;
+use crate::service::{ServiceConfig};
 use crate::managed_service::ManagedService;
 use crate::sort::topological_sort;
 
@@ -131,6 +132,7 @@ impl ServiceManager {
         Ok(())
     }
 
+
     pub fn shutdown_or_reboot(&mut self, action: SystemAction) -> io::Result<()> {
         print_step("Stopping all services...", &status_ok());
 
@@ -144,18 +146,30 @@ impl ServiceManager {
                     use nix::unistd::Pid;
 
                     let pid = Pid::from_raw(child.id() as i32);
+
+                    // Send SIGTERM to ask service to terminate gracefully
                     if let Err(e) = kill(pid, Signal::SIGTERM) {
                         eprintln!("Failed to send SIGTERM to {}: {}", svc.config.name, e);
-                    } else {
-                        thread::sleep(Duration::from_secs(1));
+                        continue;
                     }
 
-                    match child.try_wait()? {
-                        Some(_) => {}
-                        None => {
-                            eprintln!("Service {} did not exit after SIGTERM, killing...", svc.config.name);
-                            if let Err(e) = kill(pid, Signal::SIGKILL) {
-                                eprintln!("Failed to kill {}: {}", svc.config.name, e);
+                    // Wait up to 5 seconds for the process to exit gracefully
+                    let start = Instant::now();
+                    loop {
+                        match child.try_wait()? {
+                            Some(status) => {
+                                print_substep(&format!("Service {} exited with {:?}", svc.config.name, status), &status_ok());
+                                break;
+                            }
+                            None => {
+                                if start.elapsed() > Duration::from_secs(5) {
+                                    eprintln!("Service {} did not exit after SIGTERM timeout, sending SIGKILL...", svc.config.name);
+                                    if let Err(e) = kill(pid, Signal::SIGKILL) {
+                                        eprintln!("Failed to kill {}: {}", svc.config.name, e);
+                                    }
+                                    break;
+                                }
+                                thread::sleep(Duration::from_millis(200));
                             }
                         }
                     }
@@ -163,6 +177,7 @@ impl ServiceManager {
 
                 #[cfg(not(unix))]
                 {
+                    // On non-Unix systems, just kill the process
                     child.kill()?;
                 }
 
@@ -172,31 +187,30 @@ impl ServiceManager {
 
         print_step("All services stopped.", &status_ok());
 
-        print_step("Syncing disks before shutdown/reboot...", &status_ok());
+        // Flush filesystem buffers to disk before reboot/shutdown
+        print_step("Syncing disks before reboot/shutdown...", &status_ok());
         let _ = Command::new("sync").status();
+        thread::sleep(Duration::from_secs(1));  // Small delay to ensure sync completes
 
-        let candidates = match action {
-            SystemAction::Reboot => vec!["/sbin/reboot", "/bin/reboot", "reboot", "systemctl reboot", "shutdown -r now", "halt -f"],
-            SystemAction::Shutdown => vec!["/sbin/poweroff", "/bin/poweroff", "poweroff", "systemctl poweroff", "shutdown -h now", "halt -f"],
+        let cmd = match action {
+            SystemAction::Reboot => "reboot",
+            SystemAction::Shutdown => "poweroff",
         };
 
-        for cmd_str in candidates {
-            let parts: Vec<&str> = cmd_str.split_whitespace().collect();
-            let (cmd, args) = parts.split_first().unwrap();
+        print_step(&format!("Executing system command: {}", cmd), &status_ok());
 
-            print_step(&format!("Trying: {} {:?}", cmd, args), &status_ok());
-            let result = Command::new(cmd).args(args).spawn();
+        let status = Command::new(cmd)
+            .status()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to execute {}: {}", cmd, e)))?;
 
-            if let Ok(_child) = result {
-                print_step("Reboot/shutdown command started; exiting.", &status_ok());
-                std::process::exit(0);
-            } else {
-                eprintln!("Failed to execute command: {}", cmd_str);
-            }
+        if !status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("{} command failed with status: {:?}", cmd, status.code()),
+            ));
         }
 
-        Err(io::Error::new(io::ErrorKind::Other, "All shutdown/reboot attempts failed"))
+        Ok(())
     }
 }
-
 
