@@ -9,7 +9,7 @@ use crate::runtime::supervisor::supervise_services;
 use crate::runtime::system_action::{shutdown_or_reboot, SystemAction};
 use crate::runtime::dependency::resolve_services;
 
-use common::{print_step, print_substep, print_substep_last, status_ok};
+use common::{print_info_step, print_substep, print_substep_last, status_ok};
 
 pub struct ServiceManager {
     pub services: Vec<ManagedService>,
@@ -22,7 +22,7 @@ impl ServiceManager {
     }
 
     pub fn run_with_ipc(&mut self, rx: Receiver<SystemAction>) -> io::Result<()> {
-        print_step("Launching services...", &status_ok());
+        print_info_step("Launching enabled services ...");
 
         let total = self.services.len();
         for (i, svc) in self.services.iter_mut().enumerate() {
