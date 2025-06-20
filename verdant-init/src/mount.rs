@@ -39,15 +39,28 @@ fn try_mount_boot_partition(dev: &str) -> bool {
     let status = Command::new("mount")
         .args(["-t", "auto", dev, "/boot"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null()) 
+        .stderr(Stdio::null())
         .status();
 
     if let Ok(s) = status {
         if s.success() {
-            // Check if it looks like a /boot partition (has extlinux.conf or grub, etc.)
-            let looks_valid = Path::new("/boot/extlinux.conf").exists()
-                || Path::new("/boot/grub").exists()
-                || Path::new("/boot/vmlinuz").exists();
+            // Check if it looks like a /boot partition by checking for common boot files
+            let boot_dir = Path::new("/boot");
+            let looks_valid = boot_dir.read_dir()
+                .map(|mut entries| entries.any(|entry| {
+                    if let Ok(e) = entry {
+                        let fname = e.file_name();
+                        let fname = fname.to_string_lossy();
+                        // Accept common boot-related files including Alpine's initramfs-lts
+                        fname.starts_with("initramfs")
+                            || fname.starts_with("vmlinuz")
+                            || fname == "extlinux.conf"
+                            || fname == "grub"
+                    } else {
+                        false
+                    }
+                }))
+                .unwrap_or(false);
 
             if looks_valid {
                 return true;
@@ -61,7 +74,6 @@ fn try_mount_boot_partition(dev: &str) -> bool {
     false
 }
 
-
 pub fn mount_boot_partition() {
     if Path::new("/boot").exists() {
         // If /boot is already mounted or contains boot files, skip mounting
@@ -69,7 +81,7 @@ pub fn mount_boot_partition() {
             return;
         }
     }
-    
+
     let devices = find_all_block_devices();
 
     for dev in devices {
@@ -161,3 +173,4 @@ pub fn remount_root_rw() {
         }
     }
 }
+
