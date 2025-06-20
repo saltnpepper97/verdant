@@ -3,3 +3,4 @@ description = Login prompt on tty1
 exec = /sbin/getty
 args = 38400 tty1 linux
 restart = always
+tty = /dev/tty1
