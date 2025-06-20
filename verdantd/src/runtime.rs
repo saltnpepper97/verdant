@@ -4,6 +4,8 @@ use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::Receiver;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::File;
+use std::process::Stdio;
 
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
 use crate::service::{ServiceConfig, RestartPolicy};
@@ -28,6 +30,11 @@ impl ManagedService {
         if let Some(args) = &self.config.args {
             cmd.args(args);
         }
+
+        // Open /dev/null once, then clone the handle for stdout and stderr
+        let devnull = File::open("/dev/null")?;
+        cmd.stdout(Stdio::from(devnull.try_clone()?));
+        cmd.stderr(Stdio::from(devnull));
 
         let child = cmd.spawn()?;
         let pid = child.id();
