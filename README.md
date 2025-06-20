@@ -6,7 +6,7 @@
 
 ## Features
 
-- 🔧 **Clean Boot Flow** — Starts with `verdant-init` as PID 1, then hands off to `verdantd` for service supervision.
+- 🔧 **Clean Boot Flow** — Starts with `init` as PID 1, then hands off to `verdantd` for service supervision.
 - 🔁 **Modular Service Management** — Declarative `.vs` files with support for dependencies and reloading.
 - ⚡ **Lightweight and Fast** — No D-Bus. No shell scripts. No surprises. Just Rust.
 - 📦 **Musl-Compatible** — Fully functional on both musl and glibc systems.
