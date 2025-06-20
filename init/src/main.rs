@@ -14,16 +14,23 @@ use modules::{load_modules_from_map, merge_module_configs};
 use handoff::handoff_to_verdantd;
 use setup::*;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn main() {
-    // PID 1 check
-    if nix::unistd::getpid().as_raw() != 1 {
-        eprintln!("Error: verdant-init must be run as PID 1.");
-        std::process::exit(1);
+    let args: Vec<String> = std::env::args().collect();
+    let skip_pid_check = args.iter().any(|arg| arg == "--test");
+
+    if !skip_pid_check {
+        if nix::unistd::getpid().as_raw() != 1 {
+            eprintln!("Error: Verdant must be run as PID 1.");
+            std::process::exit(1);
+        }
     }
+
     wait_for_framebuffer(3);
 
     let os_name = get_os_name();
-    verdant_banner(&os_name);
+    verdant_banner(&os_name, VERSION);
 
     sleep(Duration::from_secs(1));
 
