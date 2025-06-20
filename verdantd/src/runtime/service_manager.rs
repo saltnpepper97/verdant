@@ -1,7 +1,8 @@
-use std::thread;
-use std::io::{self, BufRead};
-use std::time::Duration;
+use std::io;
 use std::sync::mpsc::Receiver;
+use std::thread;
+use std::time::Duration;
+
 use crate::service::ServiceConfig;
 use crate::managed_service::ManagedService;
 use crate::runtime::supervisor::supervise_services;
@@ -34,39 +35,10 @@ impl ServiceManager {
             }
         }
 
-        // Start thread to listen for "shutdown" or "reboot" from stdin
-        let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<SystemAction>();
-        thread::spawn(move || {
-            let stdin = io::stdin();
-            for line in stdin.lock().lines() {
-                match line {
-                    Ok(cmd) if cmd.trim() == "shutdown" => {
-                        let _ = stdin_tx.send(SystemAction::Shutdown);
-                        break;
-                    }
-                    Ok(cmd) if cmd.trim() == "reboot" => {
-                        let _ = stdin_tx.send(SystemAction::Reboot);
-                        break;
-                    }
-                    _ => {
-                        // Ignore unrecognized input
-                    }
-                }
-            }
-        });
-
-        // Supervision loop
         loop {
             supervise_services(&mut self.services)?;
 
-            // Handle IPC
             if let Ok(action) = rx.try_recv() {
-                shutdown_or_reboot(&mut self.services, action)?;
-                break;
-            }
-
-            // Handle stdin
-            if let Ok(action) = stdin_rx.try_recv() {
                 shutdown_or_reboot(&mut self.services, action)?;
                 break;
             }
@@ -77,4 +49,3 @@ impl ServiceManager {
         Ok(())
     }
 }
-

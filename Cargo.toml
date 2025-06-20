@@ -5,6 +5,6 @@ members = [
     "verdantd",
     "verdantctl",
     "ipc_protocol"
-]
+, "wrappers"]
 
 resolver = "3"
