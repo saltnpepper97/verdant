@@ -1,14 +1,15 @@
-use std::process::{Child, Command};
-use std::io;
-use std::thread;
-use std::time::Duration;
-use std::sync::mpsc::Receiver;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::process::Stdio;
+use std::io;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::Receiver;
+use std::thread;
+use std::time::Duration;
 
-use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
-use crate::service::{ServiceConfig, RestartPolicy};
+use common::{
+    print_step, print_substep, print_substep_last, status_fail, status_ok, status_warn,
+};
+use crate::service::{RestartPolicy, ServiceConfig};
 
 pub struct ManagedService {
     pub config: ServiceConfig,
@@ -22,43 +23,32 @@ pub enum SystemAction {
 
 impl ManagedService {
     pub fn new(config: ServiceConfig) -> Self {
-        Self { config, child: None }
+        Self {
+            config,
+            child: None,
+        }
     }
 
     pub fn launch(&mut self) -> io::Result<u32> {
         let mut cmd = Command::new(&self.config.exec);
-        if let Some(args) = &self.config.args {
-            cmd.args(args);
-        }
+
+        let args = self.config.args.clone().unwrap_or_default();
+        cmd.args(&args);
 
         if self.config.requires_tty {
-            // For tty services, open the tty device file and connect stdio
-            // Use the last argument (the tty device) as the path for simplicity:
-            let empty = "".to_string();
-            let tty_path = self
-                .config
-                .args
-                .as_ref()
-                .and_then(|args| args.last())
-                .unwrap_or(&empty);
+            let tty_name = args
+                .last()
+                .map(|s| s.as_str())
+                .filter(|s| !s.is_empty() && !s.contains('/') && !s.starts_with('-'))
+                .unwrap_or("tty1");
 
-            if tty_path.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "TTY service missing tty device path in args",
-                ));
-            }
-
-            let tty = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(tty_path)?;
+            let tty_path = format!("/dev/{}", tty_name);
+            let tty = OpenOptions::new().read(true).write(true).open(&tty_path)?;
 
             cmd.stdin(Stdio::from(tty.try_clone()?));
             cmd.stdout(Stdio::from(tty.try_clone()?));
             cmd.stderr(Stdio::from(tty));
         } else {
-            // For normal services, suppress output by redirecting to /dev/null
             let devnull = File::open("/dev/null")?;
             cmd.stdout(Stdio::from(devnull.try_clone()?));
             cmd.stderr(Stdio::from(devnull));
@@ -80,17 +70,24 @@ impl ManagedService {
                             &status_fail(),
                         );
                     }
+
                     match self.config.restart {
                         RestartPolicy::Always => {
                             print_step(
-                                &format!("Restarting service {} (policy: always)", self.config.name),
+                                &format!(
+                                    "Restarting service {} (policy: always)",
+                                    self.config.name
+                                ),
                                 &status_ok(),
                             );
                             self.launch()?;
                         }
                         RestartPolicy::OnFailure if !status.success() => {
                             print_step(
-                                &format!("Restarting service {} (policy: on-failure)", self.config.name),
+                                &format!(
+                                    "Restarting service {} (policy: on-failure)",
+                                    self.config.name
+                                ),
                                 &status_ok(),
                             );
                             self.launch()?;
@@ -133,7 +130,10 @@ impl ServiceManager {
             for dep in config.requires.iter().chain(config.after.iter()) {
                 if !name_to_config.contains_key(dep) {
                     print_step(
-                        &format!("Service '{}' did not start. Missing dependency: '{}'", name, dep),
+                        &format!(
+                            "Service '{}' did not start. Missing dependency: '{}'",
+                            name, dep
+                        ),
                         &status_warn(),
                     );
                     services_with_missing_deps.insert(name.clone());
@@ -247,7 +247,10 @@ impl ServiceManager {
                     match child.try_wait()? {
                         Some(_) => {}
                         None => {
-                            eprintln!("Service {} did not exit after SIGTERM, killing...", svc.config.name);
+                            eprintln!(
+                                "Service {} did not exit after SIGTERM, killing...",
+                                svc.config.name
+                            );
                             if let Err(e) = kill(pid, Signal::SIGKILL) {
                                 eprintln!("Failed to kill {}: {}", svc.config.name, e);
                             }
@@ -281,10 +284,8 @@ impl ServiceManager {
 }
 
 fn topological_sort(graph: &HashMap<String, HashSet<String>>) -> Result<Vec<String>, Vec<String>> {
-    let mut in_degree: HashMap<String, usize> = graph
-        .keys()
-        .map(|k| (k.clone(), 0))
-        .collect();
+    let mut in_degree: HashMap<String, usize> =
+        graph.keys().map(|k| (k.clone(), 0)).collect();
 
     for deps in graph.values() {
         for dep in deps {
