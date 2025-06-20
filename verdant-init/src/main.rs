@@ -14,10 +14,8 @@ use modules::{load_modules_from_map, merge_module_configs};
 use handoff::handoff_to_verdantd;
 use setup::*;
 
-use crate::mount::mount_boot_partition;
-
 fn main() {
-    mount_boot_partition();
+    wait_for_framebuffer(3);
 
     let os_name = get_os_name();
     verdant_banner(&os_name);

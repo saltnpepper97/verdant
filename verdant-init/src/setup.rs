@@ -1,10 +1,25 @@
 use std::fs::{self, Permissions, File};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::{Instant, Duration};
 use std::process::{Command, Stdio};
+use std::thread::sleep;
 use nix::unistd::sethostname;
 
 use common::{print_step, status_fail, status_ok};
+
+pub fn wait_for_framebuffer(timeout_secs: u64) -> bool {
+    let start = Instant::now();
+
+    while start.elapsed().as_secs() < timeout_secs {
+        if fs::metadata("/dev/fb0").is_ok() || fs::metadata("/dev/tty1").is_ok() {
+            return true;
+        }
+        sleep(Duration::from_millis(100));
+    }
+
+    false
+}
 
 /// Create /run/verdant with appropriate permissions
 pub fn setup_runtime_dirs() {

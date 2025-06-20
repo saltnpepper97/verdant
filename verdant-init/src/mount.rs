@@ -1,8 +1,7 @@
 use std::fs;
 use std::process::{Command, Stdio};
-use std::path::Path;
 
-use common::{print_info_step, print_step, print_substep, print_substep_last, status_fail, status_ok, status_skip, status_warn};
+use common::{print_info_step, print_step, print_substep, print_substep_last, status_fail, status_ok, status_skip};
 
 fn is_mounted(target: &str) -> bool {
     if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
@@ -34,44 +33,6 @@ fn find_all_block_devices() -> Vec<String> {
     devices
 }
 
-fn try_mount_boot_partition(dev: &str) -> bool {
-    // Try mounting the partition
-    let status = Command::new("mount")
-        .args(["-t", "auto", dev, "/boot"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null()) 
-        .status();
-
-    if let Ok(s) = status {
-        if s.success() {
-            // Check if it looks like a /boot partition (has extlinux.conf or grub, etc.)
-            let looks_valid = Path::new("/boot/extlinux.conf").exists()
-                || Path::new("/boot/grub").exists()
-                || Path::new("/boot/vmlinuz").exists();
-
-            if looks_valid {
-                return true;
-            } else {
-                // Not the right partition; unmount it
-                let _ = Command::new("umount").arg("/boot").status();
-            }
-        }
-    }
-
-    false
-}
-
-pub fn mount_boot_partition() {
-    let devices = find_all_block_devices();
-
-    for dev in devices {
-        if try_mount_boot_partition(&dev) {
-            return; // Successfully mounted
-        }
-    }
-
-    print_step("No suitable /boot partition found.", &status_warn());
-}
 fn mount_fs(source: &str, target: &str, fstype: &str, flags: &[&str], is_last: bool) -> Result<(), String> {
     if is_mounted(target) {
         if is_last {
