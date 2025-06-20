@@ -7,8 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::os::unix::process::CommandExt; 
 use std::process::Stdio;
-use libc;
-
+use libc::{setsid, ioctl, TIOCSCTTY}; 
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
 use crate::service::{ServiceConfig, RestartPolicy};
 
@@ -27,50 +26,53 @@ impl ManagedService {
         Self { config, child: None }
     }
 
-    pub fn launch(&mut self) -> io::Result<u32> {
-        let mut cmd = Command::new(&self.config.exec);
-        if let Some(args) = &self.config.args {
-            cmd.args(args);
-        }
-
-        // If a tty is specified, open it and assign stdio to it
-        if let Some(tty_path) = &self.config.tty {
-            let tty_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(tty_path)?;
-
-            // Clone to assign separately for stdin/stdout/stderr
-            let stdin = tty_file.try_clone()?;
-            let stdout = tty_file.try_clone()?;
-
-            cmd.stdin(Stdio::from(stdin));
-            cmd.stdout(Stdio::from(stdout));
-            cmd.stderr(Stdio::from(tty_file));
-
-            // Make this process a session leader (needed for getty)
-
-unsafe {
-    cmd.pre_exec(|| {
-        libc::setsid();
-        Ok(())
-    });
-}
-
-        } else {
-            // fallback to /dev/null for non-tty services
-            let devnull = File::open("/dev/null")?;
-            cmd.stdin(Stdio::null());
-            cmd.stdout(Stdio::from(devnull.try_clone()?));
-            cmd.stderr(Stdio::from(devnull));
-        }
-
-        let child = cmd.spawn()?;
-        let pid = child.id();
-        self.child = Some(child);
-        Ok(pid)
+pub fn launch(&mut self) -> io::Result<u32> {
+    let mut cmd = Command::new(&self.config.exec);
+    if let Some(args) = &self.config.args {
+        cmd.args(args);
     }
 
+    if let Some(tty_path) = &self.config.tty {
+        let tty_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tty_path)?;
+
+        let stdin = tty_file.try_clone()?;
+        let stdout = tty_file.try_clone()?;
+
+        cmd.stdin(Stdio::from(stdin));
+        cmd.stdout(Stdio::from(stdout));
+        cmd.stderr(Stdio::from(tty_file));
+
+        // Delay to allow tty to settle (optional, can remove)
+        thread::sleep(Duration::from_millis(200));
+
+        // Make this process a session leader and set controlling terminal
+        unsafe {
+            cmd.pre_exec(|| {
+                if setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if ioctl(0, TIOCSCTTY as _, 1) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    } else {
+        // fallback to /dev/null for non-tty services
+        let devnull = File::open("/dev/null")?;
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::from(devnull.try_clone()?));
+        cmd.stderr(Stdio::from(devnull));
+    }
+
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    self.child = Some(child);
+    Ok(pid)
+}
     pub fn supervise(&mut self) -> io::Result<()> {
         if let Some(child) = &mut self.child {
             match child.try_wait()? {
