@@ -68,11 +68,14 @@ pub fn print_info(message: &str) {
 
 // Banner
 pub fn verdant_banner(os_name: &str) {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+
     println!(
-        "{green}>> Verdant Init (PID 1) starting {cyan}{os}{green}{reset}",
+        "{green}>> Verdant ({version}) starting {cyan}{os}{green}{reset}",
         green = GREEN_BOLD,
         cyan = CYAN_BOLD,
         os = os_name,
+        version = VERSION,
         reset = RESET
     );
 }
