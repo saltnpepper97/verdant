@@ -26,12 +26,24 @@ impl ServiceManager {
 
         let total = self.services.len();
         for (i, svc) in self.services.iter_mut().enumerate() {
-            let pid = svc.launch()?;
-            let msg = format!("Launched service {} (PID {})", svc.config.name, pid);
-            if i == total - 1 {
-                print_substep_last(&msg, &status_ok());
-            } else {
-                print_substep(&msg, &status_ok());
+            match svc.launch() {
+                Ok(pid) => {
+                    let msg = format!("Launched service {} (PID {})", svc.config.name, pid);
+                    if i == total - 1 {
+                        print_substep_last(&msg, &status_ok());
+                    } else {
+                        print_substep(&msg, &status_ok());
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Failed to launch service {}: {}", svc.config.name, e);
+                    if i == total - 1 {
+                        print_substep_last(&msg, &common::status_fail());
+                    } else {
+                        print_substep(&msg, &common::status_fail());
+                    }
+                    // Optionally log or collect failures here, but DO NOT return Err(e)
+                }
             }
         }
 
