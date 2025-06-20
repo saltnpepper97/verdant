@@ -1,9 +1,10 @@
 use std::process::Command;
-use std::io;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Receiver;
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::Sender;
+use std::io::{self, BufRead};
 
 use common::{print_step, print_substep, print_substep_last, status_warn, status_fail, status_ok};
 use crate::service::{ServiceConfig};
@@ -97,6 +98,9 @@ impl ServiceManager {
 
         let (tx, rx_main) = std::sync::mpsc::channel();
         spawn_signal_listener(tx.clone());
+        spawn_console_listener(tx.clone());
+
+        let rx_combined = rx_main; // Can later refactor to use a select-style loop if needed
 
         let total = self.services.len();
         for (i, svc) in self.services.iter_mut().enumerate() {
@@ -114,32 +118,13 @@ impl ServiceManager {
                 svc.supervise()?;
             }
 
-            // Check IPC channel
-            if let Ok(action) = rx.try_recv() {
+            if let Ok(action) = rx_combined.try_recv() {
                 match action {
                     SystemAction::Reboot => {
-                        print_step("Received reboot command via IPC", &status_ok());
                         self.shutdown_or_reboot(SystemAction::Reboot)?;
                         break;
                     }
                     SystemAction::Shutdown => {
-                        print_step("Received shutdown command via IPC", &status_ok());
-                        self.shutdown_or_reboot(SystemAction::Shutdown)?;
-                        break;
-                    }
-                }
-            }
-
-            // Check signal listener channel
-            if let Ok(action) = rx_main.try_recv() {
-                match action {
-                    SystemAction::Reboot => {
-                        print_step("Received reboot command via signal", &status_ok());
-                        self.shutdown_or_reboot(SystemAction::Reboot)?;
-                        break;
-                    }
-                    SystemAction::Shutdown => {
-                        print_step("Received shutdown command via signal", &status_ok());
                         self.shutdown_or_reboot(SystemAction::Shutdown)?;
                         break;
                     }
@@ -148,6 +133,7 @@ impl ServiceManager {
 
             thread::sleep(Duration::from_secs(1));
         }
+
         Ok(())
     }
 
@@ -266,3 +252,28 @@ impl ServiceManager {
     }
 }
 
+pub fn spawn_console_listener(tx: Sender<SystemAction>) {
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        for line_result in stdin.lock().lines() {
+            match line_result {
+                Ok(line) => {
+                    let cmd = line.trim().to_lowercase();
+                    let action = match cmd.as_str() {
+                        "shutdown" => Some(SystemAction::Shutdown),
+                        "reboot" => Some(SystemAction::Reboot),
+                        _ => None,
+                    };
+
+                    if let Some(act) = action {
+                        let _ = tx.send(act);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading console input: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+}

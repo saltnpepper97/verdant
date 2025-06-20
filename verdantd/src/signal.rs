@@ -8,7 +8,7 @@ use crate::runtime::SystemAction;
 
 pub fn spawn_signal_listener(tx: Sender<SystemAction>) {
     // Only listen to shutdown-related signals
-    let signals = Signals::new(&[SIGTERM, SIGINT, SIGPWR]);
+    let signals = Signals::new(&[SIGTERM, SIGPWR]);
 
     match signals {
         Ok(mut signals) => {
