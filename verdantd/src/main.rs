@@ -14,7 +14,6 @@ use common::{print_step, status_ok};
 fn main() {
     print_step("verdantd started successfully", &status_ok());
 
-
     // Start IPC listener thread and get the receiver channel
     let (tx, rx) = channel::<SystemAction>();
     if let Err(e) = start_ipc_listener(tx) {

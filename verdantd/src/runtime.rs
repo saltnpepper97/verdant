@@ -187,9 +187,8 @@ impl ServiceManager {
             print_step(&format!("Trying: {} {:?}", cmd, args), &status_ok());
             let result = Command::new(cmd).args(args).spawn();
 
-            if let Ok(mut child) = result {
-                let _ = child.wait();
-                return Ok(());
+            if let Ok(_child) = result {
+                return Command::new(cmd).args(args).spawn().map(|_| ());
             } else {
                 eprintln!("Failed to execute command: {}", cmd_str);
             }
