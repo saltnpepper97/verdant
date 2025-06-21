@@ -46,15 +46,14 @@ fn main() {
 
     if let Ok(modules) = merge_module_configs() {
         if let Err(_) = load_modules_from_map(&modules) {
-            std::process::exit(1);
+            common::print_step("Warning: Failed to load some kernel modules, continuing boot", &common::status_fail());
         }
     } else {
-        common::print_step("Failed to merge kernel module configs", &common::status_fail());
-        std::process::exit(1);
+        common::print_step("Warning: Failed to merge kernel module configs, continuing boot", &common::status_fail());
     }
 
     println!();
- 
+
     if reap_zombies() {
         print_step("Reaped zombie processes", &status_ok());
     }

@@ -6,21 +6,19 @@ use common::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModuleRequirement {
-    Required,
     Optional,
     Disabled,
 }
 
 fn parse_module_line(line: &str) -> (ModuleRequirement, &str) {
     let trimmed = line.trim();
-    if trimmed.starts_with('!') {
-        (ModuleRequirement::Required, trimmed[1..].trim())
-    } else if trimmed.starts_with('-') {
+    if trimmed.starts_with('-') {
         (ModuleRequirement::Disabled, trimmed[1..].trim())
     } else {
         (ModuleRequirement::Optional, trimmed)
     }
 }
+
 
 fn load_module(module: &str, is_last: bool) -> Result<(), ()> {
     io::stdout().flush().unwrap();
@@ -62,17 +60,9 @@ pub fn merge_module_configs() -> Result<HashMap<String, ModuleRequirement>, ()> 
             }
 
             let (req, module) = parse_module_line(line);
-            match req {
-                ModuleRequirement::Disabled => {
-                    modules.insert(module.to_string(), ModuleRequirement::Disabled);
-                }
-                _ => {
-                    let entry = modules.entry(module.to_string()).or_insert(req);
-                    if *entry != ModuleRequirement::Required && req == ModuleRequirement::Required {
-                        *entry = ModuleRequirement::Required;
-                    }
-                }
-            }
+
+            modules.insert(module.to_string(), req);
+
         }
         Ok(())
     };
@@ -119,21 +109,12 @@ pub fn load_modules_from_map(modules: &HashMap<String, ModuleRequirement>) -> Re
         match load_result {
             Ok(()) => {}
             Err(()) => {
-                if *requirement == ModuleRequirement::Required {
-                    if is_last {
-                        print_substep_last(&format!("Required module {} failed to load.", module), &status_fail());
-                    } else {
-                        print_substep(&format!("Required module {} failed to load.", module), &status_fail());
-                    }
-                    return Err(());
+                if is_last {
+                    print_substep_last(&format!("Optional module {} failed to load.", module), &status_fail());
                 } else {
-                    if is_last {
-                        print_substep_last(&format!("Optional module {} failed to load.", module), &status_fail());
-                    } else {
-                        print_substep(&format!("Optional module {} failed to load.", module), &status_fail());
-                    }
+                    print_substep(&format!("Optional module {} failed to load.", module), &status_fail());
                 }
-            }
+            } 
         }
     }
 
