@@ -11,18 +11,21 @@ pub enum SystemAction {
 pub fn shutdown_or_reboot(services: &mut [ManagedService], action: SystemAction) -> io::Result<()> {
     print_step("Stopping all services...", &status_ok());
 
-    // Identify the last service with a child
-    let last_index_opt = services
+    // Collect indices of services that need to be stopped
+    let mut to_stop: Vec<usize> = services
         .iter()
-        .rev()
         .enumerate()
-        .find(|(_, svc)| svc.child.is_some())
-        .map(|(rev_idx, _)| services.len() - 1 - rev_idx);
+        .filter(|(_, svc)| svc.child.is_some())
+        .map(|(i, _)| i)
+        .collect();
 
-    for (i, svc) in services.iter_mut().enumerate().rev() {
+    // Reverse to stop in dependency order
+    to_stop.reverse();
+
+    for (idx, &svc_index) in to_stop.iter().enumerate() {
+        let svc = &mut services[svc_index];
         if let Some(child) = &mut svc.child {
-            let is_last = Some(i) == last_index_opt;
-
+            let is_last = idx == to_stop.len() - 1;
             let print = if is_last { print_substep_last } else { print_substep };
             print(&format!("Stopping service {}", svc.config.name), &status_ok());
 
