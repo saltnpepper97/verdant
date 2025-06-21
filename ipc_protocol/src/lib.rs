@@ -2,25 +2,25 @@ use serde::{Serialize, Deserialize};
 
 pub const SOCKET_PATH: &str = "/run/verdantd.sock";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type", content = "data")]
 pub enum Request {
-    StartService { name: String },
-    StopService { name: String },
-    RestartService { name: String },
-    ReloadService { name: String },
-    ReloadAllServices,
+    Start { name: String },
+    Stop { name: String },
+    Restart { name: String },
+    Reload { name: String },
+    ReloadAll,
     Shutdown,
     Reboot,
-    EnableModule { name: String },
-    DisableModule { name: String },
+    Enable { name: String },
+    Disable { name: String },
     Status,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Response {
-    Ok,
-    Error(String),
+    Success { message: String },
+    Error { message: String },
     StatusInfo(String),
 }
-
 

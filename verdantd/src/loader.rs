@@ -28,3 +28,17 @@ pub fn load_enabled_services() -> Vec<ServiceConfig> {
     configs
 }
 
+pub fn load_enabled_services_quiet() -> Vec<ServiceConfig> {
+    let mut configs = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(ENABLED_DIR) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(cfg) = ServiceConfig::from_file(&path) {
+                configs.push(cfg);
+            }
+        }
+    }
+
+    configs
+}

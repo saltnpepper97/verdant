@@ -1,5 +1,5 @@
 use std::os::unix::net::UnixStream;
-use std::io::{Write, Read};
+use std::io::{Write, BufRead, BufReader};
 
 use clap::{Parser, Subcommand};
 use ipc_protocol::{Request, Response, SOCKET_PATH};
@@ -15,15 +15,34 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Start a service by name")]
     Start { name: String },
+
+    #[command(about = "Stop a service by name")]
     Stop { name: String },
+
+    #[command(about = "Restart a service by name")]
     Restart { name: String },
+
+    #[command(about = "Reload a service's configuration by name")]
     Reload { name: String },
+
+    #[command(about = "Reload all services")]
     ReloadAll,
+
+    #[command(about = "Shutdown the system")]
     Shutdown,
+
+    #[command(about = "Reboot the system")]
     Reboot,
-    EnableModule { name: String },
-    DisableModule { name: String },
+
+    #[command(about = "Enable a module by name")]
+    Enable { name: String },
+
+    #[command(about = "Disable a module by name")]
+    Disable { name: String },
+
+    #[command(about = "Show system and service status")]
     Status,
 }
 
@@ -34,8 +53,12 @@ fn send_request(req: &Request) -> std::io::Result<Response> {
     stream.write_all(req_json.as_bytes())?;
     stream.write_all(b"\n")?;
 
+    // Important: shutdown the write half so the server knows no more data is coming
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut reader = BufReader::new(&stream);
     let mut response_buf = String::new();
-    stream.read_to_string(&mut response_buf)?;
+    reader.read_line(&mut response_buf)?;
 
     let response: Response = serde_json::from_str(&response_buf)?;
     Ok(response)
@@ -44,53 +67,23 @@ fn send_request(req: &Request) -> std::io::Result<Response> {
 fn main() {
     let cli = Cli::parse();
 
-    let (request, action_description) = match &cli.command {
-        Command::Start { name } => (
-            Request::StartService { name: name.clone() },
-            format!("Starting service '{}'", name),
-        ),
-        Command::Stop { name } => (
-            Request::StopService { name: name.clone() },
-            format!("Stopping service '{}'", name),
-        ),
-        Command::Restart { name } => (
-            Request::RestartService { name: name.clone() },
-            format!("Restarting service '{}'", name),
-        ),
-        Command::Reload { name } => (
-            Request::ReloadService { name: name.clone() },
-            format!("Reloading service '{}'", name),
-        ),
-        Command::ReloadAll => (
-            Request::ReloadAllServices,
-            "Reloading all services".into(),
-        ),
-        Command::Shutdown => (
-            Request::Shutdown,
-            "Shutting down system".into(),
-        ),
-        Command::Reboot => (
-            Request::Reboot,
-            "Rebooting system".into(),
-        ),
-        Command::EnableModule { name } => (
-            Request::EnableModule { name: name.clone() },
-            format!("Enabling module '{}'", name),
-        ),
-        Command::DisableModule { name } => (
-            Request::DisableModule { name: name.clone() },
-            format!("Disabling module '{}'", name),
-        ),
-        Command::Status => (
-            Request::Status,
-            "Fetching system status".into(),
-        ),
+    let request = match &cli.command {
+        Command::Start { name } => Request::Start { name: name.clone() },
+        Command::Stop { name } => Request::Stop { name: name.clone() },
+        Command::Restart { name } => Request::Restart { name: name.clone() },
+        Command::Reload { name } => Request::Reload { name: name.clone() },
+        Command::ReloadAll => Request::ReloadAll,
+        Command::Shutdown => Request::Shutdown,
+        Command::Reboot => Request::Reboot,
+        Command::Enable { name } => Request::Enable { name: name.clone() },
+        Command::Disable { name } => Request::Disable { name: name.clone() },
+        Command::Status => Request::Status,
     };
 
     match send_request(&request) {
-        Ok(Response::Ok) => println!("{}", action_description),
+        Ok(Response::Success { message }) => println!("{}", message),
+        Ok(Response::Error { message }) => eprintln!("Error: {}", message),
         Ok(Response::StatusInfo(info)) => println!("{}", info),
-        Ok(Response::Error(e)) => eprintln!("Failed: {}: {}", action_description.to_lowercase(), e),
         Err(e) => eprintln!("Failed to communicate with verdantd: {}", e),
     }
 }
