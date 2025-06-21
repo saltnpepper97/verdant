@@ -4,81 +4,6 @@ use std::path::Path;
 
 use common::{print_step, print_info_step, print_substep, print_substep_last, status_ok, status_skip, status_fail};
 
-fn find_boot_partition() -> Option<String> {
-    // First try by-label (most reliable if available)
-    let candidates = ["BOOT", "boot", "EFI", "efi"];
-    for label in &candidates {
-        let path = format!("/dev/disk/by-label/{}", label);
-        if Path::new(&path).exists() {
-            if let Ok(real_path) = fs::read_link(&path) {
-                return Some(format!("/dev/{}", real_path.display()));
-            }
-        }
-    }
-
-    // Try parsing lsblk for a partition with mountpoint "/boot" or label "BOOT"
-    if let Ok(output) = Command::new("lsblk")
-        .args(&["-no", "NAME,LABEL,MOUNTPOINT"])
-        .output()
-    {
-        if let Ok(stdout) = String::from_utf8(output.stdout) {
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 1 {
-                    let name = parts[0];
-                    let label = parts.get(1).copied().unwrap_or("");
-                    let mountpoint = parts.get(2).copied().unwrap_or("");
-
-                    if mountpoint == "/boot" {
-                        return Some(format!("/dev/{}", name));
-                    }
-
-                    if label.eq_ignore_ascii_case("boot") || label.eq_ignore_ascii_case("efi") {
-                        return Some(format!("/dev/{}", name));
-                    }
-                }
-            }
-        }
-    }
-
-    // Try fallback candidates for common devices (dangerous if too broad)
-    for dev in &["/dev/sda1", "/dev/vda1", "/dev/mmcblk0p1"] {
-        if Path::new(dev).exists() {
-            return Some(dev.to_string());
-        }
-    }
-
-    None
-}
-
-pub fn mount_boot_partition() -> Result<(), String> {
-    if is_mounted("/boot") {
-        print_step("/boot is already mounted", &status_skip());
-        return Ok(());
-    }
-
-    if let Some(device) = find_boot_partition() {
-        let fs_types = ["vfat", "ext4", "ext3", "ext2"];
-        for fstype in &fs_types {
-            let status = Command::new("mount")
-                .args(["-t", fstype])
-                .arg(&device)
-                .arg("/boot")
-                .status()
-                .map_err(|e| e.to_string())?;
-
-            if status.success() {
-                print_step("Mounted /boot partition", &status_ok());
-                return Ok(());
-            }
-        }
-
-        Err(format!("Found {} but could not mount with known FS types", device))
-    } else {
-        Err("No boot partition found using label, lsblk, or fallback paths".into())
-    }
-}
-
 fn is_mounted(target: &str) -> bool {
     if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
         mounts.lines().any(|line| line.contains(&format!(" {}", target)))
@@ -165,5 +90,60 @@ pub fn remount_root_rw() {
         Err(e) => {
             print_step(&format!("Failed to remount root filesystem: {}", e), &status_fail());
         }
+    }
+}
+
+/// Mounts local filesystems listed in /etc/fstab (like /boot)
+pub fn mount_local_filesystems() {
+    use std::fs::read_to_string;
+
+    print_info_step("Mounting local filesystems ...");
+
+    let fstab = match read_to_string("/etc/fstab") {
+        Ok(s) => s,
+        Err(e) => {
+            print_step(&format!("Failed to read /etc/fstab: {}", e), &status_fail());
+            return;
+        }
+    };
+
+    let mut entries = vec![];
+
+    for line in fstab.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+
+        let source = parts[0];
+        let target = parts[1];
+        let fstype = parts[2];
+        let options = parts[3];
+
+        // Skip ignored types
+        if fstype == "swap" || options.contains("noauto") {
+            continue;
+        }
+
+        // Skip pseudo-filesystems already mounted in mount_essential
+        if ["/", "/proc", "/sys", "/dev", "/run", "/dev/pts", "/dev/shm", "/tmp"].contains(&target) {
+            continue;
+        }
+
+        let flags: Vec<&str> = vec!["-o", options];
+
+        entries.push((source.to_string(), target.to_string(), fstype.to_string(), flags));
+    }
+
+    let last_index = entries.len().saturating_sub(1);
+
+    for (i, (source, target, fstype, flags)) in entries.into_iter().enumerate() {
+        let is_last = i == last_index;
+        let _ = mount_fs(&source, &target, &fstype, &flags, is_last);
     }
 }

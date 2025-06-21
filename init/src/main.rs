@@ -9,10 +9,11 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 
 use common::{print_step, status_ok, verdant_banner};
-use mount::{remount_root_rw, mount_essential, mount_boot_partition};
+use mount::{remount_root_rw, mount_essential, mount_local_filesystems};
 use modules::{load_modules_from_map, merge_module_configs};
 use handoff::handoff_to_verdantd;
 use setup::*;
+
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -40,13 +41,6 @@ fn main() {
 
     println!();
 
-    match mount_boot_partition() {
-        Ok(_) => (),
-        Err(e) => {
-            common::print_step(&format!("{}", e), &common::status_fail());
-        }
-    }
-
     setup_lock_dir();
     setup_runtime_dirs();
     setup_device_manager();
@@ -68,6 +62,7 @@ fn main() {
     check_root_filesystem();
 
     remount_root_rw();
+    mount_local_filesystems();
     setup_hostname();
     
     handoff_to_verdantd() 
