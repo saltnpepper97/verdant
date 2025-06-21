@@ -1,7 +1,7 @@
 use std::{process::Command, io, thread, time::Instant};
 use std::time::Duration;
 use crate::managed_service::ManagedService;
-use common::{print_step, print_substep, status_ok, status_warn};
+use common::{print_step, print_substep, print_substep_last, status_ok, status_warn};
 
 pub enum SystemAction {
     Reboot,
@@ -11,9 +11,20 @@ pub enum SystemAction {
 pub fn shutdown_or_reboot(services: &mut [ManagedService], action: SystemAction) -> io::Result<()> {
     print_step("Stopping all services...", &status_ok());
 
-    for svc in services.iter_mut().rev() {
+    // Identify the last service with a child
+    let last_index_opt = services
+        .iter()
+        .rev()
+        .enumerate()
+        .find(|(_, svc)| svc.child.is_some())
+        .map(|(rev_idx, _)| services.len() - 1 - rev_idx);
+
+    for (i, svc) in services.iter_mut().enumerate().rev() {
         if let Some(child) = &mut svc.child {
-            print_substep(&format!("Stopping service {}", svc.config.name), &status_ok());
+            let is_last = Some(i) == last_index_opt;
+
+            let print = if is_last { print_substep_last } else { print_substep };
+            print(&format!("Stopping service {}", svc.config.name), &status_ok());
 
             #[cfg(unix)]
             {
@@ -31,7 +42,7 @@ pub fn shutdown_or_reboot(services: &mut [ManagedService], action: SystemAction)
                 loop {
                     match child.try_wait()? {
                         Some(status) => {
-                            print_substep(&format!("Service {} exited with {:?}", svc.config.name, status), &status_ok());
+                            print(&format!("Service {} exited with {:?}", svc.config.name, status), &status_ok());
                             break;
                         }
                         None => {
@@ -54,6 +65,8 @@ pub fn shutdown_or_reboot(services: &mut [ManagedService], action: SystemAction)
             svc.child = None;
         }
     }
+
+    println!();
 
     print_step("All services stopped.", &status_ok());
     print_step("Syncing disks before reboot/shutdown...", &status_ok());
@@ -113,3 +126,4 @@ pub fn shutdown_or_reboot(services: &mut [ManagedService], action: SystemAction)
 
     Ok(())
 }
+
