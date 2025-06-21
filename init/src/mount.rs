@@ -4,30 +4,62 @@ use std::path::Path;
 
 use common::{print_step, print_info_step, print_substep, print_substep_last, status_ok, status_skip, status_fail};
 
-fn find_boot_by_label() -> Option<String> {
+fn find_boot_partition() -> Option<String> {
+    // First try by-label (most reliable if available)
     let candidates = ["BOOT", "boot", "EFI", "efi"];
-
     for label in &candidates {
-        let path_str = format!("/dev/disk/by-label/{}", label);
-        let path = Path::new(&path_str);
-        if path.exists() {
-            if let Ok(real_path) = fs::read_link(path) {
-                // real_path is relative, so join with /dev/disk/by-label
-                let full_path = path.parent().unwrap().join(real_path);
-                if let Some(dev_path) = full_path.to_str() {
-                    return Some(dev_path.to_string());
+        let path = format!("/dev/disk/by-label/{}", label);
+        if Path::new(&path).exists() {
+            if let Ok(real_path) = fs::read_link(&path) {
+                return Some(format!("/dev/{}", real_path.display()));
+            }
+        }
+    }
+
+    // Try parsing lsblk for a partition with mountpoint "/boot" or label "BOOT"
+    if let Ok(output) = Command::new("lsblk")
+        .args(&["-no", "NAME,LABEL,MOUNTPOINT"])
+        .output()
+    {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 1 {
+                    let name = parts[0];
+                    let label = parts.get(1).copied().unwrap_or("");
+                    let mountpoint = parts.get(2).copied().unwrap_or("");
+
+                    if mountpoint == "/boot" {
+                        return Some(format!("/dev/{}", name));
+                    }
+
+                    if label.eq_ignore_ascii_case("boot") || label.eq_ignore_ascii_case("efi") {
+                        return Some(format!("/dev/{}", name));
+                    }
                 }
             }
         }
     }
+
+    // Try fallback candidates for common devices (dangerous if too broad)
+    for dev in &["/dev/sda1", "/dev/vda1", "/dev/mmcblk0p1"] {
+        if Path::new(dev).exists() {
+            return Some(dev.to_string());
+        }
+    }
+
     None
 }
 
-pub fn mount_boot_by_label() -> Result<(), String> {
-    if let Some(device) = find_boot_by_label() {
-        // Try common boot filesystems
-        let fstype_attempts = ["vfat", "ext4", "ext3", "ext2"];
-        for fstype in &fstype_attempts {
+pub fn mount_boot_partition() -> Result<(), String> {
+    if is_mounted("/boot") {
+        print_step("/boot is already mounted", &status_skip());
+        return Ok(());
+    }
+
+    if let Some(device) = find_boot_partition() {
+        let fs_types = ["vfat", "ext4", "ext3", "ext2"];
+        for fstype in &fs_types {
             let status = Command::new("mount")
                 .args(["-t", fstype])
                 .arg(&device)
@@ -36,13 +68,14 @@ pub fn mount_boot_by_label() -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
 
             if status.success() {
-                print_step("Boot Partition found mounting", &status_ok());
+                print_step("Mounted /boot partition", &status_ok());
                 return Ok(());
             }
         }
-        Err(format!("Failed to mount {} as known boot fs types", device))
+
+        Err(format!("Found {} but could not mount with known FS types", device))
     } else {
-        Err("No /boot partition found by label".into())
+        Err("No boot partition found using label, lsblk, or fallback paths".into())
     }
 }
 

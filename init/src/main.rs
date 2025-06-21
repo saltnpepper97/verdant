@@ -8,8 +8,8 @@ use std::time::Duration;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 
-use common::{print_step, print_substep_last, status_ok, status_fail, verdant_banner};
-use mount::{remount_root_rw, mount_essential, mount_boot_by_label};
+use common::{print_step, status_ok, verdant_banner};
+use mount::{remount_root_rw, mount_essential, mount_boot_partition};
 use modules::{load_modules_from_map, merge_module_configs};
 use handoff::handoff_to_verdantd;
 use setup::*;
@@ -40,7 +40,12 @@ fn main() {
 
     println!();
 
-    let _ = mount_boot_by_label();
+    match mount_boot_partition() {
+        Ok(_) => (),
+        Err(e) => {
+            common::print_step(&format!("{}", e), &common::status_fail());
+        }
+    }
 
     setup_lock_dir();
     setup_runtime_dirs();
