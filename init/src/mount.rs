@@ -144,13 +144,20 @@ pub fn mount_fstab_filesystems(
 
 
 /// Resolve UUID= or LABEL= sources to device paths
+/// For pseudo-filesystems like tmpfs, proc, etc., return as-is.
 fn resolve_source(source: &str) -> Result<String, BloomError> {
+    // Pseudo-filesystems should be passed through untouched
+    let pseudo_fs = ["tmpfs", "proc", "sysfs", "devpts", "devtmpfs", "cgroup", "cgroup2"];
+    if pseudo_fs.contains(&source) {
+        return Ok(source.to_string());
+    }
+
     if let Some(uuid) = source.strip_prefix("UUID=") {
         resolve_symlink_target("/dev/disk/by-uuid", uuid)
     } else if let Some(label) = source.strip_prefix("LABEL=") {
         resolve_symlink_target("/dev/disk/by-label", label)
     } else {
-        // Absolute device path: check if it exists
+        // Normal device path (e.g. /dev/sda1)
         let path = Path::new(source);
         if path.exists() {
             Ok(source.to_string())
@@ -159,6 +166,7 @@ fn resolve_source(source: &str) -> Result<String, BloomError> {
         }
     }
 }
+
 
 fn resolve_symlink_target(base_dir: &str, name: &str) -> Result<String, BloomError> {
     let path = Path::new(base_dir).join(name);
