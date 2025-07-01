@@ -4,7 +4,7 @@ use std::time::Duration;
 use std::thread::sleep;
 
 use nix::sys::socket::{socket, AddressFamily, SockType, SockFlag};
-use nix::libc::{sockaddr_in, AF_INET, sockaddr, in_addr, c_char, self};
+use nix::libc::{sockaddr_in, AF_INET, sockaddr, in_addr, c_char,self};
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -59,7 +59,7 @@ fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError>
 
     // Get current flags
     unsafe {
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS.try_into().unwrap(), &mut ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCGIFFLAGS failed for {}", ifname)));
         }
     }
@@ -70,7 +70,7 @@ fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError>
 
     // Set flags back
     unsafe {
-        if libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFFLAGS.try_into().unwrap(), &ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCSIFFLAGS failed for {}", ifname)));
         }
     }
@@ -112,7 +112,7 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
     }
 
     unsafe {
-        if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFADDR.try_into().unwrap(), &ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCSIFADDR failed for {}", ifname)));
         }
     }
