@@ -1,7 +1,7 @@
 name: acpid
 desc: ACPI daemon for power management events
 
-cmd: /usr/sbin/acpid
+cmd: /sbin/acpid
 args: -f
 
 startup-package: base
