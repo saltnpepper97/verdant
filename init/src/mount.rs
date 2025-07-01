@@ -140,7 +140,13 @@ fn resolve_source(source: &str) -> Result<String, BloomError> {
     } else if let Some(label) = source.strip_prefix("LABEL=") {
         resolve_symlink_target("/dev/disk/by-label", label)
     } else {
-        Ok(source.to_string())
+        // Absolute device path: check if it exists
+        let path = Path::new(source);
+        if path.exists() {
+            Ok(source.to_string())
+        } else {
+            Err(BloomError::Custom(format!("Device {} does not exist", source)))
+        }
     }
 }
 
@@ -149,18 +155,24 @@ fn resolve_symlink_target(base_dir: &str, name: &str) -> Result<String, BloomErr
     if !path.exists() {
         return Err(BloomError::Custom(format!("{} does not exist", path.display())));
     }
+
     let target = fs::read_link(&path)
         .map_err(|e| BloomError::Custom(format!("Failed to read symlink {}: {}", path.display(), e)))?;
-    // The symlink target can be relative, so join with base_dir if relative
-    let target_path = if target.is_absolute() {
+
+    let full_path = if target.is_absolute() {
         target
     } else {
-        Path::new(base_dir).join(target)
+        path.parent().unwrap_or(Path::new("/")).join(target)
     };
-    // Canonicalize to get full path
-    let canonical = fs::canonicalize(&target_path)
-        .map_err(|e| BloomError::Custom(format!("Failed to canonicalize {}: {}", target_path.display(), e)))?;
-    Ok(canonical.to_string_lossy().to_string())
+
+    let canonical = fs::canonicalize(&full_path)
+        .map_err(|e| BloomError::Custom(format!("Failed to canonicalize {}: {}", full_path.display(), e)))?;
+
+    if canonical.exists() {
+        Ok(canonical.to_string_lossy().to_string())
+    } else {
+        Err(BloomError::Custom(format!("Resolved device {} does not exist", canonical.display())))
+    }
 }
 
 /// Helper: split mount options into MsFlags and data string for mount syscall
