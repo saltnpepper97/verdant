@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut file = file_logger.lock().unwrap();
 
         
-        let mut vars = HashMap::new();
+        let vars = HashMap::new();
         let services = load_services(&vars, &mut *con, &mut *file)?;
 
         let mut mgr = manager.lock().unwrap();

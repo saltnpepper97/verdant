@@ -21,10 +21,8 @@ pub struct LaunchResult {
 
 pub fn start_service(
     service: &ServiceFile,
-    console_logger: &mut dyn ConsoleLogger,
     file_logger: &mut dyn FileLogger,
 ) -> Result<LaunchResult, BloomError> {
-    let timer = ProcessTimer::start();
 
     // Prepare stdout/stderr log paths or defaults if not set
     let stdout_log = match &service.stdout_log {
@@ -127,7 +125,6 @@ pub fn start_service(
     })?;
 
     let msg = format!("Launched service '{}', pid {}", service.name, child.id());
-    console_logger.message(LogLevel::Ok, &msg, timer.elapsed());
     file_logger.log(LogLevel::Ok, &msg);
 
     Ok(LaunchResult {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -66,10 +66,6 @@ pub fn load_services(
             }
         }
     }
-
-    let summary_msg = format!("Loaded {} service file(s) from {}", services.len(), SERVICE_DIR);
-    console_logger.message(bloom::status::LogLevel::Info, &summary_msg, std::time::Duration::ZERO);
-    file_logger.log(bloom::status::LogLevel::Info, &summary_msg);
 
     Ok(services)
 }

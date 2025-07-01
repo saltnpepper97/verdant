@@ -39,6 +39,7 @@ impl Supervisor {
         }
     }
 
+    /// Start the service; if `silent` is true, suppress console logging.
     pub fn start(&mut self) -> Result<(), BloomError> {
         if self.child.is_some() {
             return Err(BloomError::Custom(format!(
@@ -47,15 +48,14 @@ impl Supervisor {
             )));
         }
 
-        let mut con = self.console_logger.lock().unwrap();
+        self.state = ServiceState::Starting;
         let mut file = self.file_logger.lock().unwrap();
 
-        self.state = ServiceState::Starting;
-        let launch_result = start_service(&self.service, &mut *con, &mut *file)?;
+        let launch_result = start_service(&self.service, &mut *file)?;
         self.child = Some(launch_result.child);
-        self.last_start = Some(launch_result.start_time);
-        self.restart_count = 0;
+        self.last_start = Some(launch_result.start_time); 
 
+        self.restart_count = 0;
         Ok(())
     }
 
@@ -147,10 +147,10 @@ impl Supervisor {
                                     }
                                     ServiceState::Starting
                                 } else {
-                                    break; // exit supervise loop on clean exit
+                                    break;
                                 }
                             }
-                            RestartPolicy::Never => break, // exit supervise loop
+                            RestartPolicy::Never => break,
                         }
                     }
                     Ok(None) => {
@@ -168,7 +168,7 @@ impl Supervisor {
                         )));
                     }
                 },
-                None => break, // no child, nothing to supervise
+                None => break,
             };
 
             if current_state != last_state {
