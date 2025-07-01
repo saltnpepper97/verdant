@@ -13,13 +13,15 @@ mod service_manager;
 mod signal;
 mod utils;
 
-use std::time::Duration;
-use std::process::{Command, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+use std::{
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
 };
-use std::thread;
 
 use nix::sys::signal::{SigSet, Signal};
 
@@ -29,12 +31,30 @@ use bloom::status::LogLevel;
 use crate::service_manager::launch_verdant_service_manager;
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("Init panic: {info}");
+    }));
+
+    let result = std::panic::catch_unwind(inner_main);
+
+    if result.is_err() {
+        eprintln!("Fatal error in init process. Dropping to emergency shell.");
+        spawn_recovery_shell();
+    }
+
+    // Fallback loop to prevent PID 1 from ever exiting
+    loop {
+        eprintln!("System halted. Manual intervention required.");
+        thread::sleep(Duration::from_secs(10));
+    }
+}
+
+fn inner_main() {
     let (raw_console_logger, file_logger, start_time) = run::boot();
 
     let console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>> =
         Arc::new(Mutex::new(raw_console_logger));
     let file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>> = file_logger;
-
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let reboot_flag = Arc::new(AtomicBool::new(false));
@@ -66,45 +86,29 @@ fn main() {
         });
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    thread::sleep(Duration::from_millis(500));
 
+    // Show boot timing
     {
-        use bloom::colour::color::{YELLOW, RESET};
+        use bloom::colour::color::{RESET, YELLOW};
         use bloom::time::format_duration;
+
         let elapsed = start_time.elapsed();
-        println!();
-        println!("Took: {} {} {}", YELLOW, format_duration(elapsed), RESET);
+        println!("\nTook: {} {} {}", YELLOW, format_duration(elapsed), RESET);
     }
 
-    // Launch verdantd without waiting for it to exit
-    let mut con = console_logger.lock().unwrap();
-    if let Some(_child) = launch_verdant_service_manager(&mut *con) {
-        // success
-    } else {
-        con.message(
-            LogLevel::Fail,
-            "Critical: Could not launch Verdant Service Manager. Dropping to recovery shell.",
-            Duration::ZERO,
-        );
-        drop(con); // release lock before shell
-
-        match Command::new("/bin/sh")
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .and_then(|mut child| child.wait())
-        {
-            Ok(status) => {
-                println!("Recovery shell exited with status: {status}");
-            }
-            Err(e) => {
-                eprintln!("Failed to launch recovery shell: {e}");
-            }
+    // Launch VerdantD
+    if let Ok(mut guard) = console_logger.lock() {
+        let logger: &mut dyn ConsoleLogger = &mut *guard;
+        if launch_verdant_service_manager(logger).is_none() {
+            logger.message(
+                LogLevel::Fail,
+                "Critical: Could not launch Verdant Service Manager. Dropping to recovery shell.",
+                Duration::ZERO,
+            );
+            drop(guard);
+            spawn_recovery_shell();
         }
-
-        // Optionally reboot or halt afterwards
-        shutdown_flag.store(true, Ordering::SeqCst);
     }
 
     // Install signal handlers
@@ -116,18 +120,38 @@ fn main() {
     )
     .expect("Failed to install signal handlers");
 
+    // Main control loop
     loop {
         if reboot_flag.load(Ordering::SeqCst) {
             log_shutdown(&console_logger, &file_logger, "Reboot");
             let _ = actions::reboot();
             break;
         }
+
         if shutdown_flag.load(Ordering::SeqCst) {
             log_shutdown(&console_logger, &file_logger, "Shutdown");
             let _ = actions::shutdown();
             break;
         }
-        thread::park_timeout(std::time::Duration::from_secs(1));
+
+        thread::park_timeout(Duration::from_secs(1));
+    }
+}
+
+fn spawn_recovery_shell() {
+    match Command::new("/bin/sh")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .and_then(|mut child| child.wait())
+    {
+        Ok(status) => {
+            eprintln!("Recovery shell exited with status: {status}");
+        }
+        Err(e) => {
+            eprintln!("Failed to launch recovery shell: {e}");
+        }
     }
 }
 
@@ -137,11 +161,13 @@ fn log_shutdown(
     action: &str,
 ) {
     let msg = format!("Init {} requested, shutting down cleanly.", action);
+
     if let Ok(mut con) = console_logger.lock() {
-        con.message(bloom::status::LogLevel::Info, &msg, std::time::Duration::ZERO);
+        con.message(LogLevel::Info, &msg, Duration::ZERO);
     }
+
     if let Ok(mut file) = file_logger.lock() {
-        file.log(bloom::status::LogLevel::Info, &msg);
+        file.log(LogLevel::Info, &msg);
     }
 }
 

@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -19,39 +18,37 @@ pub fn load_hardware_drivers(
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
-    // Run depmod early
-    if Path::new("/sbin/depmod").exists() {
-        let _ = Command::new("/sbin/depmod")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
+    // Run depmod to regenerate modules.dep (just in case)
+    let _ = Command::new("/sbin/depmod")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 
-    // Use BTreeSet to keep aliases sorted (predictable load order)
     let mut aliases = BTreeSet::new();
 
-    // Only look in /sys/devices, filter broken paths
     for entry in WalkDir::new("/sys/devices")
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_name() == "modalias")
     {
-        let path: PathBuf = entry.path().to_path_buf();
+        let path = entry.path();
 
-        // Avoid hanging on special files or sockets
-        if let Ok(metadata) = fs::metadata(&path) {
-            if !metadata.is_file() {
-                continue;
-            }
+        // Skip if not a regular file
+        if !path.is_file() {
+            continue;
         }
 
-        if let Ok(file) = File::open(&path) {
-            let reader = BufReader::new(file);
-            for line in reader.lines().flatten() {
-                let alias = line.trim();
-                if !alias.is_empty() && alias.len() < 256 {
-                    aliases.insert(alias.to_string());
+        // Skip if driver already bound
+        if path.parent().map(|p| p.join("driver").exists()).unwrap_or(false) {
+            continue;
+        }
+
+        if let Ok(file) = File::open(path) {
+            for line in BufReader::new(file).lines().flatten() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && trimmed.len() < 256 {
+                    aliases.insert(trimmed.to_string());
                 }
             }
         }
@@ -79,6 +76,7 @@ pub fn load_hardware_drivers(
                     Some(status) if status.success() => loaded += 1,
                     _ => {
                         let _ = child.kill();
+                        let _ = child.wait();
                         failed += 1;
                         let _ = file_logger.log(
                             LogLevel::Info,

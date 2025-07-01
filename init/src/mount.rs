@@ -84,6 +84,11 @@ pub fn mount_fstab_filesystems(
             continue;
         }
 
+        // Skip bogus mount point
+        if target == "none" || !Path::new(target).is_absolute() {
+            continue;
+        }
+
         // Ensure mount point exists
         let target_path = Path::new(target);
         if !target_path.exists() {
@@ -113,7 +118,6 @@ pub fn mount_fstab_filesystems(
             file_logger,
             &timer,
         ) {
-            // Demote EINVAL and ENOENT (missing media or unsupported fs) to warnings
             let kind = e.to_string();
             if kind.contains("EINVAL") || kind.contains("ENOENT") {
                 log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Skipped mount {}: {}", target, e));
@@ -125,7 +129,6 @@ pub fn mount_fstab_filesystems(
 
     Ok(())
 }
-
 
 fn parse_mount_flags(options: &str) -> MsFlags {
     let mut flags = MsFlags::empty();
