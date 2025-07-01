@@ -128,7 +128,7 @@ fn inner_main() {
             break;
         }
 
-        thread::park_timeout(Duration::from_secs(1));
+        thread::sleep(Duration::from_secs(500));
     }
 }
 
