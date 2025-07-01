@@ -7,6 +7,7 @@ use bloom::log::{ConsoleLogger, FileLogger};
 use bloom::status::LogLevel;
 use bloom::time::ProcessTimer;
 
+use libc::SIGPWR;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use signal_hook::{consts::signal::*, iterator::Signals};
 
@@ -16,7 +17,8 @@ pub fn install_signal_handlers(
     console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
     main_thread: std::thread::Thread,
 ) -> Result<(), BloomError> {
-    let mut signals = Signals::new(&[SIGCHLD, SIGTERM]) // Ignore SIGINT (Ctrl+C)
+    // Added SIGPWR for ACPI power events
+    let mut signals = Signals::new(&[SIGCHLD, SIGTERM, SIGPWR]) // Ignore SIGINT (Ctrl+C)
         .map_err(|e| BloomError::Custom(format!("Failed to register signals: {e}")))?;
 
     thread::spawn(move || {
@@ -45,8 +47,13 @@ pub fn install_signal_handlers(
                         }
                     }
                 }
-                SIGTERM => {
-                    let msg = "Received SIGTERM, scheduling shutdown".to_string();
+                SIGTERM | SIGPWR => {
+                    let msg = if signal == SIGTERM {
+                        "Received SIGTERM, scheduling shutdown".to_string()
+                    } else {
+                        "Received SIGPWR (ACPI power event), scheduling shutdown".to_string()
+                    };
+
                     if let Ok(mut log) = file_logger.lock() {
                         log.log(LogLevel::Warn, &msg);
                     }
