@@ -56,8 +56,10 @@ pub fn mount_fstab_filesystems(
     let timer = ProcessTimer::start();
     let fstab = File::open("/etc/fstab").map_err(BloomError::Io)?;
 
-    for line in BufReader::new(fstab).lines() {
-        let line = line.map_err(BloomError::Io)?.trim().to_string();
+    for line_result in BufReader::new(fstab).lines() {
+        let line = line_result.map_err(BloomError::Io)?.trim().to_string();
+
+        // Skip empty or comment lines
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -73,43 +75,50 @@ pub fn mount_fstab_filesystems(
         let fstype = fields[2];
         let options = fields[3];
 
-        // Skip if 'noauto' present (means do not mount automatically)
+        // Skip root "/", already mounted
+        if target == "/" {
+            continue;
+        }
+
+        // Skip "none" or invalid mount points (non-absolute)
+        if target == "none" || !Path::new(target).is_absolute() {
+            continue;
+        }
+
+        // Skip if "noauto" present in options
         if options.split(',').any(|opt| opt == "noauto") {
             log_success(console_logger, file_logger, &timer, LogLevel::Info, &format!("Skipping noauto mount: {}", target));
             continue;
         }
 
-        // Skip root, already mounted
-        if target == "/" {
-            continue;
-        }
-
-        // Skip bogus mount point (e.g., none, non-absolute paths)
-        if target == "none" || !Path::new(target).is_absolute() {
-            continue;
-        }
-
-        // Ensure mount point directory exists
+        // Ensure mount point exists
         let target_path = Path::new(target);
         if !target_path.exists() {
-            if let Err(e) = fs::create_dir_all(target_path) {
-                log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Failed to create mount point {}: {}", target, e));
-                continue;
+            match fs::create_dir_all(target_path) {
+                Ok(_) => log_success(console_logger, file_logger, &timer, LogLevel::Info, &format!("Created mount point {}", target)),
+                Err(e) => {
+                    log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Failed to create mount point {}: {}", target, e));
+                    continue;
+                }
             }
         }
 
-        // Resolve UUID= and LABEL= sources
+        // Resolve the device source path (UUID=, LABEL=, or absolute)
         let source = match resolve_source(raw_source) {
-            Ok(resolved) => resolved,
+            Ok(dev) => dev,
             Err(e) => {
                 log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Could not resolve source '{}': {}", raw_source, e));
                 continue;
             }
         };
 
-        // Split options into mount flags and mount data
+        // Log resolved source for debug
+        log_success(console_logger, file_logger, &timer, LogLevel::Info, &format!("Mounting {} -> {} as {}", source, target, fstype));
+
+        // Split mount options into flags and data string
         let (flags, data) = split_mount_options(options);
 
+        // Attempt the mount syscall with correct types
         if let Err(e) = crate::fs::mount_fs(
             Some(&source),
             target,
@@ -132,6 +141,7 @@ pub fn mount_fstab_filesystems(
 
     Ok(())
 }
+
 
 /// Resolve UUID= or LABEL= sources to device paths
 fn resolve_source(source: &str) -> Result<String, BloomError> {
