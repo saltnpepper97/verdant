@@ -1,0 +1,12 @@
+# Rust build output
+/target/
+
+# Logs
+*.log
+
+# Cargo lock for workspace (optional, but often checked in)
+# Cargo.lock
+
+# IDE/editor config files (optional)
+.vscode/
+.idea/
