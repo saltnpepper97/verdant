@@ -23,16 +23,22 @@ pub fn setup_loopback(
 
     let sock = socket(AddressFamily::Inet, SockType::Datagram, SockFlag::empty(), None)
         .map_err(|e| BloomError::Custom(format!("Failed to open socket: {}", e)))?;
-
     let raw_sock = sock.as_raw_fd();
+
+    // Only bring up if not already up
+    if is_interface_up(raw_sock, "lo")? {
+        let msg = "Loopback interface already up";
+        console_logger.message(LogLevel::Info, msg, timer.elapsed());
+        file_logger.log(LogLevel::Info, msg);
+        return Ok(());
+    }
 
     bring_interface_up(raw_sock, "lo")?;
     assign_loopback_address(raw_sock, "lo")?;
 
-    // Pause briefly to let interface settle
     sleep(Duration::from_millis(100));
 
-    let msg = "Network interface configured";
+    let msg = "Loopback interface configured";
     console_logger.message(LogLevel::Ok, msg, timer.elapsed());
     file_logger.log(LogLevel::Ok, msg);
 
@@ -120,3 +126,26 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
     Ok(())
 }
 
+fn is_interface_up(sock: libc::c_int, ifname: &str) -> Result<bool, BloomError> {
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct Ifreq {
+        ifr_name: [c_char; libc::IFNAMSIZ],
+        ifr_flags: libc::c_short,
+        _pad: [u8; 24],
+    }
+
+    let mut ifr: Ifreq = unsafe { zeroed() };
+    for (dst, src) in ifr.ifr_name.iter_mut().zip(ifname.bytes()) {
+        *dst = src as c_char;
+    }
+
+    unsafe {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS.try_into().unwrap(), &mut ifr) < 0 {
+            return Err(BloomError::Custom(format!("ioctl SIOCGIFFLAGS failed for {}", ifname)));
+        }
+    }
+
+    const IFF_UP: libc::c_short = 0x1;
+    Ok(ifr.ifr_flags & IFF_UP != 0)
+}
