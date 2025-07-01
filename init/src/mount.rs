@@ -68,7 +68,7 @@ pub fn mount_fstab_filesystems(
             continue;
         }
 
-        let source = fields[0];
+        let raw_source = fields[0];
         let target = fields[1];
         let fstype = fields[2];
         let options = fields[3];
@@ -98,18 +98,20 @@ pub fn mount_fstab_filesystems(
             }
         }
 
-        // Skip if source is a device path (/dev/...) but does not exist
-        // **Do NOT skip if source is UUID= or LABEL= style!**
-        if source.starts_with("/dev/") && !Path::new(source).exists() {
-            log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Device {} not found, skipping mount of {}", source, target));
-            continue;
-        }
+        // Resolve UUID= and LABEL= sources
+        let source = match resolve_source(raw_source) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Could not resolve source '{}': {}", raw_source, e));
+                continue;
+            }
+        };
 
         // Split options into mount flags and mount data
         let (flags, data) = split_mount_options(options);
 
         if let Err(e) = crate::fs::mount_fs(
-            Some(source),
+            Some(&source),
             target,
             Some(fstype),
             flags,
@@ -129,6 +131,36 @@ pub fn mount_fstab_filesystems(
     }
 
     Ok(())
+}
+
+/// Resolve UUID= or LABEL= sources to device paths
+fn resolve_source(source: &str) -> Result<String, BloomError> {
+    if let Some(uuid) = source.strip_prefix("UUID=") {
+        resolve_symlink_target("/dev/disk/by-uuid", uuid)
+    } else if let Some(label) = source.strip_prefix("LABEL=") {
+        resolve_symlink_target("/dev/disk/by-label", label)
+    } else {
+        Ok(source.to_string())
+    }
+}
+
+fn resolve_symlink_target(base_dir: &str, name: &str) -> Result<String, BloomError> {
+    let path = Path::new(base_dir).join(name);
+    if !path.exists() {
+        return Err(BloomError::Custom(format!("{} does not exist", path.display())));
+    }
+    let target = fs::read_link(&path)
+        .map_err(|e| BloomError::Custom(format!("Failed to read symlink {}: {}", path.display(), e)))?;
+    // The symlink target can be relative, so join with base_dir if relative
+    let target_path = if target.is_absolute() {
+        target
+    } else {
+        Path::new(base_dir).join(target)
+    };
+    // Canonicalize to get full path
+    let canonical = fs::canonicalize(&target_path)
+        .map_err(|e| BloomError::Custom(format!("Failed to canonicalize {}: {}", target_path.display(), e)))?;
+    Ok(canonical.to_string_lossy().to_string())
 }
 
 /// Helper: split mount options into MsFlags and data string for mount syscall
