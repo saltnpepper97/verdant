@@ -63,14 +63,11 @@ pub fn mount_fs(
     file_logger: &mut impl FileLogger,
     timer: &ProcessTimer,
 ) -> Result<(), BloomError> {
-    // Skip invalid or empty source/target
-    if source.map_or(true, |s| s.is_empty() || s == "none") || target.is_empty() || target == "none" {
-        return Ok(()); // skip invalid or virtual-only
+    if source == Some("none") || target == "none" {
+        return Ok(()); // skip invalid/virtual-only
     }
 
     let target_path = Path::new(target);
-
-    // Create mount point if missing
     if !target_path.exists() {
         if let Err(e) = create_dir_all(target_path) {
             let msg = format!("Failed to create mount point {}: {}", target, e);
@@ -79,28 +76,24 @@ pub fn mount_fs(
         }
     }
 
-    // Check if already mounted
     if is_mounted(target)? {
         log_success(console_logger, file_logger, timer, LogLevel::Info, &format!("{} already mounted at {}", fs_name, target));
         return Ok(());
     }
 
-    // Avoid passing empty string as data, pass None instead
-    let data_opt = match data {
-        Some(d) if d.is_empty() => None,
-        other => other,
+    // Pass mount data only for certain filesystem types (tmpfs, nfs, cifs, fuse)
+    let supported_data_fs = ["tmpfs", "nfs", "cifs", "fuse"];
+    let mount_data = match fstype {
+        Some(fs) if supported_data_fs.contains(&fs) => data,
+        _ => None,
     };
 
-    // Attempt mount syscall
-    match mount(source, target_path, fstype, flags, data_opt) {
+    match mount(source, target_path, fstype, flags, mount_data) {
         Ok(()) => {
             log_success(console_logger, file_logger, timer, LogLevel::Ok, &format!("Mounted {} at {}", fs_name, target));
             Ok(())
         }
-        Err(e) if e == Errno::ENODEV => {
-            // Device or filesystem not present, silently ignore this
-            Ok(())
-        }
+        Err(e) if e == Errno::ENODEV => Ok(()), // ignore silently
         Err(e) => {
             let msg = format!("Failed to mount {} at {}: {}", fs_name, target, e);
             log_error(console_logger, file_logger, timer, LogLevel::Fail, &msg);

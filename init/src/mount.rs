@@ -105,10 +105,9 @@ pub fn mount_fstab_filesystems(
             continue;
         }
 
-        // Parse mount flags and data separately
-        let (flags, data) = parse_mount_flags_and_data(options);
+        // Split options into mount flags and mount data
+        let (flags, data) = split_mount_options(options);
 
-        // Try to mount
         if let Err(e) = crate::fs::mount_fs(
             Some(source),
             target,
@@ -121,7 +120,6 @@ pub fn mount_fstab_filesystems(
             &timer,
         ) {
             let err_str = e.to_string();
-            // Warn on EINVAL (invalid options) or ENOENT (device missing)
             if err_str.contains("EINVAL") || err_str.contains("ENOENT") {
                 log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Skipped mount {}: {}", target, e));
             } else {
@@ -133,10 +131,8 @@ pub fn mount_fstab_filesystems(
     Ok(())
 }
 
-/// Parses mount flags and data from the mount options string.
-/// Flags (ro, rw, nosuid, etc) go into MsFlags.
-/// Other options (like size=, uid=) go into data string passed to mount syscall.
-fn parse_mount_flags_and_data(options: &str) -> (MsFlags, Option<String>) {
+/// Helper: split mount options into MsFlags and data string for mount syscall
+fn split_mount_options(options: &str) -> (MsFlags, Option<String>) {
     let mut flags = MsFlags::empty();
     let mut data_opts = Vec::new();
 
@@ -150,7 +146,7 @@ fn parse_mount_flags_and_data(options: &str) -> (MsFlags, Option<String>) {
             "relatime" => flags |= MsFlags::MS_RELATIME,
             "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
             "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
-            other => data_opts.push(other), // non-flag options go to data string
+            other => data_opts.push(other),
         }
     }
 
@@ -161,25 +157,6 @@ fn parse_mount_flags_and_data(options: &str) -> (MsFlags, Option<String>) {
     };
 
     (flags, data)
-}
-
-
-fn parse_mount_flags(options: &str) -> MsFlags {
-    let mut flags = MsFlags::empty();
-    for opt in options.split(',') {
-        match opt {
-            "ro" => flags |= MsFlags::MS_RDONLY,
-            "rw" => flags &= !MsFlags::MS_RDONLY,
-            "noexec" => flags |= MsFlags::MS_NOEXEC,
-            "nosuid" => flags |= MsFlags::MS_NOSUID,
-            "nodev" => flags |= MsFlags::MS_NODEV,
-            "relatime" => flags |= MsFlags::MS_RELATIME,
-            "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
-            "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
-            _ => (),
-        }
-    }
-    flags
 }
 
 fn log_success(
