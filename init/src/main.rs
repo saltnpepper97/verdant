@@ -22,18 +22,19 @@ use std::sync::{
 use std::thread;
 
 use nix::sys::signal::{SigSet, Signal};
+
 use bloom::log::{ConsoleLogger, FileLogger};
 use bloom::status::LogLevel;
 
 use crate::service_manager::launch_verdant_service_manager;
 
 fn main() {
-    let (raw_console_logger, raw_file_logger, start_time) = run::boot();
+    let (raw_console_logger, file_logger, start_time) = run::boot();
 
     let console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>> =
         Arc::new(Mutex::new(raw_console_logger));
-    let file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>> =
-        Arc::new(Mutex::new(raw_file_logger));
+    let file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>> = file_logger;
+
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let reboot_flag = Arc::new(AtomicBool::new(false));
@@ -103,7 +104,7 @@ fn main() {
         }
 
         // Optionally reboot or halt afterwards
-        //shutdown_flag.store(true, Ordering::SeqCst);
+        shutdown_flag.store(true, Ordering::SeqCst);
     }
 
     // Install signal handlers

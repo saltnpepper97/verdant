@@ -13,3 +13,4 @@ signal-hook = "0.3.18"
 tokio = { version = "1", features = ["process", "rt-multi-thread", "macros"] }
 udev = "0.9.3"
 walkdir = "2.5.0"
+wait-timeout = "0.2"
