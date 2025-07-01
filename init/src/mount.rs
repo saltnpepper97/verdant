@@ -73,23 +73,23 @@ pub fn mount_fstab_filesystems(
         let fstype = fields[2];
         let options = fields[3];
 
-        // Skip mounting if 'noauto' is present
+        // Skip if 'noauto' present (means do not mount automatically)
         if options.split(',').any(|opt| opt == "noauto") {
             log_success(console_logger, file_logger, &timer, LogLevel::Info, &format!("Skipping noauto mount: {}", target));
             continue;
         }
 
-        // Skip root (already mounted)
+        // Skip root, already mounted
         if target == "/" {
             continue;
         }
 
-        // Skip bogus mount point
+        // Skip bogus mount point (e.g., none, non-absolute paths)
         if target == "none" || !Path::new(target).is_absolute() {
             continue;
         }
 
-        // Ensure mount point exists
+        // Ensure mount point directory exists
         let target_path = Path::new(target);
         if !target_path.exists() {
             if let Err(e) = fs::create_dir_all(target_path) {
@@ -98,15 +98,17 @@ pub fn mount_fstab_filesystems(
             }
         }
 
-        // Skip if source device does not exist (for media devices)
+        // Skip if source is a device path (/dev/...) but does not exist
+        // **Do NOT skip if source is UUID= or LABEL= style!**
         if source.starts_with("/dev/") && !Path::new(source).exists() {
-            log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!(
-                "Device {} not found, skipping mount of {}", source, target));
+            log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Device {} not found, skipping mount of {}", source, target));
             continue;
         }
 
+        // Parse mount flags
         let flags = parse_mount_flags(options);
 
+        // Try to mount
         if let Err(e) = crate::fs::mount_fs(
             Some(source),
             target,
@@ -118,8 +120,9 @@ pub fn mount_fstab_filesystems(
             file_logger,
             &timer,
         ) {
-            let kind = e.to_string();
-            if kind.contains("EINVAL") || kind.contains("ENOENT") {
+            let err_str = e.to_string();
+            // Warn on EINVAL (invalid options) or ENOENT (device missing)
+            if err_str.contains("EINVAL") || err_str.contains("ENOENT") {
                 log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Skipped mount {}: {}", target, e));
             } else {
                 log_error(console_logger, file_logger, &timer, LogLevel::Fail, &format!("Failed to mount {}: {}", target, e));
@@ -129,6 +132,7 @@ pub fn mount_fstab_filesystems(
 
     Ok(())
 }
+
 
 fn parse_mount_flags(options: &str) -> MsFlags {
     let mut flags = MsFlags::empty();
