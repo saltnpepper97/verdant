@@ -105,8 +105,8 @@ pub fn mount_fstab_filesystems(
             continue;
         }
 
-        // Parse mount flags
-        let flags = parse_mount_flags(options);
+        // Parse mount flags and data separately
+        let (flags, data) = parse_mount_flags_and_data(options);
 
         // Try to mount
         if let Err(e) = crate::fs::mount_fs(
@@ -114,7 +114,7 @@ pub fn mount_fstab_filesystems(
             target,
             Some(fstype),
             flags,
-            Some(options),
+            data.as_deref(),
             &format!("fstab entry {}", target),
             console_logger,
             file_logger,
@@ -131,6 +131,36 @@ pub fn mount_fstab_filesystems(
     }
 
     Ok(())
+}
+
+/// Parses mount flags and data from the mount options string.
+/// Flags (ro, rw, nosuid, etc) go into MsFlags.
+/// Other options (like size=, uid=) go into data string passed to mount syscall.
+fn parse_mount_flags_and_data(options: &str) -> (MsFlags, Option<String>) {
+    let mut flags = MsFlags::empty();
+    let mut data_opts = Vec::new();
+
+    for opt in options.split(',') {
+        match opt {
+            "ro" => flags |= MsFlags::MS_RDONLY,
+            "rw" => flags &= !MsFlags::MS_RDONLY,
+            "noexec" => flags |= MsFlags::MS_NOEXEC,
+            "nosuid" => flags |= MsFlags::MS_NOSUID,
+            "nodev" => flags |= MsFlags::MS_NODEV,
+            "relatime" => flags |= MsFlags::MS_RELATIME,
+            "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
+            "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
+            other => data_opts.push(other), // non-flag options go to data string
+        }
+    }
+
+    let data = if data_opts.is_empty() {
+        None
+    } else {
+        Some(data_opts.join(","))
+    };
+
+    (flags, data)
 }
 
 
