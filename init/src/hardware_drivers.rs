@@ -1,7 +1,7 @@
-use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ pub fn load_hardware_drivers(
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
-    // depmod first so modaliases resolve
+    // Run depmod early
     if Path::new("/sbin/depmod").exists() {
         let _ = Command::new("/sbin/depmod")
             .stdout(Stdio::null())
@@ -27,19 +27,30 @@ pub fn load_hardware_drivers(
             .status();
     }
 
-    // collect modaliases from sysfs
-    let mut aliases = HashSet::new();
+    // Use BTreeSet to keep aliases sorted (predictable load order)
+    let mut aliases = BTreeSet::new();
+
+    // Only look in /sys/devices, filter broken paths
     for entry in WalkDir::new("/sys/devices")
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_name() == "modalias")
     {
-        if let Ok(file) = File::open(entry.path()) {
+        let path: PathBuf = entry.path().to_path_buf();
+
+        // Avoid hanging on special files or sockets
+        if let Ok(metadata) = fs::metadata(&path) {
+            if !metadata.is_file() {
+                continue;
+            }
+        }
+
+        if let Ok(file) = File::open(&path) {
             let reader = BufReader::new(file);
             for line in reader.lines().flatten() {
                 let alias = line.trim();
-                if !alias.is_empty() {
+                if !alias.is_empty() && alias.len() < 256 {
                     aliases.insert(alias.to_string());
                 }
             }
@@ -57,14 +68,14 @@ pub fn load_hardware_drivers(
     let mut loaded = 0;
     let mut failed = 0;
 
-    for alias in &aliases {
+    for alias in aliases {
         let mut cmd = Command::new("/sbin/modprobe");
-        cmd.arg("-b").arg(alias);
+        cmd.arg("-b").arg(&alias);
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
         match cmd.spawn() {
             Ok(mut child) => {
-                match child.wait_timeout(timeout).unwrap() {
+                match child.wait_timeout(timeout).unwrap_or(None) {
                     Some(status) if status.success() => loaded += 1,
                     _ => {
                         let _ = child.kill();

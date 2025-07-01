@@ -30,9 +30,9 @@ pub fn boot() -> (ConsoleLoggerImpl, Arc<Mutex<FileLoggerImpl>>, SystemTimer) {
         let _ = set_hostname(&mut console_logger, &mut *file_log);
         let _ = detect_timezone(&mut console_logger, &mut *file_log);
         let _ = mount_virtual_filesystems(&mut console_logger, &mut *file_log);
+        let _ = start_device_manager(&mut console_logger, &mut *file_log);
         let _ = load_kernel_modules(&mut console_logger, &mut *file_log);
         let _ = apply_sysctl_settings(&mut console_logger, &mut *file_log);
-        let _ = start_device_manager(&mut console_logger, &mut *file_log);
     }
 
     // Spawn udev monitor thread here, cloning Arc so it owns a handle
