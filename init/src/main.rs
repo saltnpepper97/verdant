@@ -14,6 +14,7 @@ mod signal;
 mod utils;
 
 use std::{
+    env::args,
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -23,17 +24,17 @@ use std::{
     time::Duration,
 };
 
-use nix::sys::signal::{SigSet, Signal};
-
 use bloom::log::{ConsoleLogger, FileLogger};
 use bloom::status::LogLevel;
 
 use crate::service_manager::launch_verdant_service_manager;
 
 fn main() {
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("Init panic: {info}");
-    }));
+    // Check for "test" argument to skip full init (useful for running under debugger/test harness)
+    if args().any(|arg| arg == "test") {
+        eprintln!("Test mode detected, skipping full init.");
+        return;
+    }
 
     let result = std::panic::catch_unwind(inner_main);
 
@@ -42,10 +43,9 @@ fn main() {
         spawn_recovery_shell();
     }
 
-    // Fallback loop to prevent PID 1 from ever exiting
+    // Minimal fallback loop to keep PID 1 alive without spamming output
     loop {
-        eprintln!("System halted. Manual intervention required.");
-        thread::sleep(Duration::from_secs(10));
+        thread::sleep(Duration::from_secs(60));
     }
 }
 
@@ -59,13 +59,7 @@ fn inner_main() {
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let reboot_flag = Arc::new(AtomicBool::new(false));
 
-    // Block signals globally
-    let mut sigset = SigSet::empty();
-    sigset.add(Signal::SIGCHLD);
-    sigset.add(Signal::SIGTERM);
-    sigset.thread_block().expect("Failed to block signals");
-
-    // Start IPC server
+    // Start IPC server thread (comment out if suspected to cause issues)
     {
         let ipc_shutdown_flag = Arc::clone(&shutdown_flag);
         let ipc_reboot_flag = Arc::clone(&reboot_flag);
@@ -97,7 +91,7 @@ fn inner_main() {
         println!("\nTook: {} {} {}", YELLOW, format_duration(elapsed), RESET);
     }
 
-    // Launch VerdantD
+    // Launch VerdantD service manager
     if let Ok(mut guard) = console_logger.lock() {
         let logger: &mut dyn ConsoleLogger = &mut *guard;
         if launch_verdant_service_manager(logger).is_none() {
@@ -111,7 +105,7 @@ fn inner_main() {
         }
     }
 
-    // Install signal handlers
+    // Install signal handlers (simplified, no global blocking)
     signal::install_signal_handlers(
         Arc::clone(&shutdown_flag),
         Arc::clone(&file_logger),

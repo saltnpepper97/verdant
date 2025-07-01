@@ -1,3 +1,4 @@
+use std::io::{stdout, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -21,6 +22,8 @@ pub fn boot() -> (ConsoleLoggerImpl, Arc<Mutex<FileLoggerImpl>>, SystemTimer) {
     let start_time = SystemTimer::new();
 
     print!("\x1b[2J\x1b[H");
+    stdout().flush().unwrap();
+
     let version = env!("CARGO_PKG_VERSION");
     let banner = format!("Verdant Init v{version} - Rooted in Resilience");
     console_logger.banner(&banner);
