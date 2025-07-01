@@ -20,6 +20,7 @@ pub fn boot() -> (ConsoleLoggerImpl, Arc<Mutex<FileLoggerImpl>>, SystemTimer) {
     let file_logger = Arc::new(Mutex::new(FileLoggerImpl::new(LogLevel::Info, "/var/log/verdant.log")));
     let start_time = SystemTimer::new();
 
+    print!("\x1b[2J\x1b[H");
     let version = env!("CARGO_PKG_VERSION");
     let banner = format!("Verdant Init v{version} - Rooted in Resilience");
     console_logger.banner(&banner);

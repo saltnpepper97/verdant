@@ -200,8 +200,6 @@ pub fn parse_service_file(
         service.stderr_log = Some(format!("/var/log/verdant/services/{}.err.log", service.name));
     }
 
-    log_success(console_logger, file_logger, &timer, LogLevel::Ok, &format!("Parsed service file '{}'", service.name));
-
     Ok(service)
 }
 

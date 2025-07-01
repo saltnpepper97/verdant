@@ -1,6 +1,7 @@
 mod ipc_server;
 mod loader;
 mod manager;
+mod ordering;
 mod parser;
 mod process;
 mod service_file;

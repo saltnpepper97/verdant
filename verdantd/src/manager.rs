@@ -82,7 +82,7 @@ pub fn start_startup_services(&mut self) -> Result<(), BloomError> {
         if started_count > 0 {
             for name in &to_spawn {
                 if let Some(pkg) = self.supervisors.get(name).and_then(|s| s.service.startup_package.clone()) {
-                    let per_service_msg = format!("Started service '{}' with startup_package '{}'", name, pkg);
+                    let per_service_msg = format!("Started service '{}' with startup package '{}'", name, pkg);
                     con.message(LogLevel::Info, &per_service_msg, std::time::Duration::ZERO);
                     file.log(LogLevel::Info, &per_service_msg);
                 }
