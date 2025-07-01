@@ -1,11 +1,14 @@
-use std::process::{Command, Stdio};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
-use std::time::Duration;
+use std::process::{Command, Stdio};
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
 use bloom::status::LogLevel;
 use bloom::time::ProcessTimer;
+
+use walkdir::WalkDir;
 
 pub fn load_hardware_drivers(
     console_logger: &mut impl ConsoleLogger,
@@ -13,15 +16,13 @@ pub fn load_hardware_drivers(
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
-    let uevent_helper = "/bin/echo"; // neutralize blocking helper if needed
+    let uevent_helper = "/bin/echo";
     let uevent_path = "/proc/sys/kernel/hotplug";
 
-    // Prevent legacy hotplug helpers from interfering
     if Path::new(uevent_path).exists() {
-        let _ = std::fs::write(uevent_path, uevent_helper);
+        let _ = fs::write(uevent_path, uevent_helper);
     }
 
-    // Best-effort depmod
     if Path::new("/sbin/depmod").exists() {
         let _ = Command::new("/sbin/depmod")
             .stdout(Stdio::null())
@@ -29,40 +30,31 @@ pub fn load_hardware_drivers(
             .status();
     }
 
-    // Walk /sys/devices and re-trigger uevents
-    let result = Command::new("find")
-        .arg("/sys/devices/")
-        .arg("-name")
-        .arg("uevent")
-        .stdout(Stdio::piped())
-        .spawn()
-        .and_then(|find| {
-            let xargs = Command::new("xargs")
-                .arg("-n1")
-                .arg("-I{}")
-                .arg("sh")
-                .arg("-c")
-                .arg("echo add > {}")
-                .stdin(find.stdout.unwrap())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            xargs
-        });
+    let mut triggered = 0;
+    for entry in WalkDir::new("/sys/devices")
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name() == "uevent")
+    {
+        let path = entry.path();
+        if let Ok(mut file) = OpenOptions::new().write(true).open(path) {
+            if file.write_all(b"add\n").is_ok() {
+                triggered += 1;
+            }
+        }
+    }
 
-    match result {
-        Ok(status) if status.success() => {
-            let msg = "Re-triggered uevents to load hardware modules.";
-            file_logger.log(LogLevel::Info, msg);
-            console_logger.message(LogLevel::Ok, msg, timer.elapsed());
-            Ok(())
-        }
-        _ => {
-            let msg = "Failed to trigger kernel uevents for hardware driver loading.";
-            file_logger.log(LogLevel::Warn, msg);
-            console_logger.message(LogLevel::Warn, msg, timer.elapsed());
-            Err(BloomError::Custom(msg.into()))
-        }
+    if triggered > 0 {
+        let msg = format!("Triggered {} kernel uevents to load drivers", triggered);
+        file_logger.log(LogLevel::Info, &msg);
+        console_logger.message(LogLevel::Ok, &msg, timer.elapsed());
+        Ok(())
+    } else {
+        let msg = "No uevents could be triggered (nothing written to /sys/.../uevent)";
+        file_logger.log(LogLevel::Warn, msg);
+        console_logger.message(LogLevel::Warn, msg, timer.elapsed());
+        Err(BloomError::Custom(msg.into()))
     }
 }
 
