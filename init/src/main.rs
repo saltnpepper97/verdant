@@ -13,6 +13,8 @@ mod service_manager;
 mod signal;
 mod utils;
 
+use std::time::Duration;
+use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -21,6 +23,7 @@ use std::thread;
 
 use nix::sys::signal::{SigSet, Signal};
 use bloom::log::{ConsoleLogger, FileLogger};
+use bloom::status::LogLevel;
 
 use crate::service_manager::launch_verdant_service_manager;
 
@@ -73,12 +76,34 @@ fn main() {
     }
 
     // Launch verdantd without waiting for it to exit
-    if let Some(_child) = {
-        let mut con = console_logger.lock().unwrap();
-        launch_verdant_service_manager(&mut *con)
-    } {
+    let mut con = console_logger.lock().unwrap();
+    if let Some(_child) = launch_verdant_service_manager(&mut *con) {
+        // success
     } else {
-        shutdown_flag.store(true, Ordering::SeqCst);
+        con.message(
+            LogLevel::Fail,
+            "Critical: Could not launch Verdant Service Manager. Dropping to recovery shell.",
+            Duration::ZERO,
+        );
+        drop(con); // release lock before shell
+
+        match Command::new("/bin/sh")
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .and_then(|mut child| child.wait())
+        {
+            Ok(status) => {
+                println!("Recovery shell exited with status: {status}");
+            }
+            Err(e) => {
+                eprintln!("Failed to launch recovery shell: {e}");
+            }
+        }
+
+        // Optionally reboot or halt afterwards
+        //shutdown_flag.store(true, Ordering::SeqCst);
     }
 
     // Install signal handlers
