@@ -60,31 +60,31 @@ pub fn detect_timezone(
     let link_target = match fs::read_link(localtime_path) {
         Ok(target) => target,
         Err(e) => {
-            log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Could not read /etc/localtime symlink: {}", e));
+            log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!(
+                "Could not read /etc/localtime symlink: {}", e));
             return Ok(None);
         }
     };
 
-    let zoneinfo_prefix = Path::new("/usr/share/zoneinfo/");
-    if !link_target.starts_with(zoneinfo_prefix) {
-        log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("/etc/localtime symlink does not point inside zoneinfo: {:?}", link_target));
-        return Ok(None);
-    }
+    let zoneinfo_roots = [
+        Path::new("/usr/share/zoneinfo/"),
+        Path::new("/etc/zoneinfo/"),
+    ];
 
-    let tz_path: PathBuf = link_target.strip_prefix(zoneinfo_prefix).unwrap().to_path_buf();
-
-    match tz_path.to_str() {
-        Some(tz_str) => {
-            log_success(console_logger, file_logger, &timer, LogLevel::Ok, &format!("Detected timezone '{}'", tz_str));
-            Ok(Some(tz_str.to_string()))
-        }
-        None => {
-            log_error(console_logger, file_logger, &timer, LogLevel::Fail, "Failed to convert timezone path to string");
-            Ok(None)
+    for root in &zoneinfo_roots {
+        if let Ok(stripped) = link_target.strip_prefix(root) {
+            if let Some(tz_str) = stripped.to_str() {
+                log_success(console_logger, file_logger, &timer, LogLevel::Ok, &format!(
+                    "Detected timezone '{}'", tz_str));
+                return Ok(Some(tz_str.to_string()));
+            }
         }
     }
+
+    log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!(
+        "/etc/localtime symlink does not point inside known zoneinfo roots: {:?}", link_target));
+    Ok(None)
 }
-
 
 
 pub fn sync_clock_from_hardware(
