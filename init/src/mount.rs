@@ -58,8 +58,6 @@ pub fn mount_fstab_filesystems(
 
     for line_result in BufReader::new(fstab).lines() {
         let line = line_result.map_err(BloomError::Io)?.trim().to_string();
-
-        // Skip empty or comment lines
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -70,57 +68,39 @@ pub fn mount_fstab_filesystems(
             continue;
         }
 
-        let raw_source = fields[0];
+        let source = fields[0];
         let target = fields[1];
         let fstype = fields[2];
         let options = fields[3];
 
-        // Skip root "/", already mounted
-        if target == "/" {
+        if target == "/" || target == "none" || !Path::new(target).is_absolute() {
             continue;
         }
 
-        // Skip "none" or invalid mount points (non-absolute)
-        if target == "none" || !Path::new(target).is_absolute() {
-            continue;
-        }
-
-        // Skip if "noauto" present in options
         if options.split(',').any(|opt| opt == "noauto") {
-            log_success(console_logger, file_logger, &timer, LogLevel::Info, &format!("Skipping noauto mount: {}", target));
             continue;
         }
 
-        // Ensure mount point exists
         let target_path = Path::new(target);
         if !target_path.exists() {
-            match fs::create_dir_all(target_path) {
-                Ok(_) => log_success(console_logger, file_logger, &timer, LogLevel::Info, &format!("Created mount point {}", target)),
-                Err(e) => {
-                    log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Failed to create mount point {}: {}", target, e));
-                    continue;
-                }
+            if let Err(e) = fs::create_dir_all(target_path) {
+                log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Failed to create mount point {}: {}", target, e));
+                continue;
             }
         }
 
-        // Resolve the device source path (UUID=, LABEL=, or absolute)
-        let source = match resolve_source(raw_source) {
-            Ok(dev) => dev,
+        let resolved_source = match resolve_source(source) {
+            Ok(s) => s,
             Err(e) => {
-                log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Could not resolve source '{}': {}", raw_source, e));
+                log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Failed to resolve {}: {}", source, e));
                 continue;
             }
         };
 
-        // Log resolved source for debug
-        log_success(console_logger, file_logger, &timer, LogLevel::Info, &format!("Mounting {} -> {} as {}", source, target, fstype));
-
-        // Split mount options into flags and data string
         let (flags, data) = split_mount_options(options);
 
-        // Attempt the mount syscall with correct types
         if let Err(e) = crate::fs::mount_fs(
-            Some(&source),
+            Some(&resolved_source),
             target,
             Some(fstype),
             flags,
@@ -130,12 +110,12 @@ pub fn mount_fstab_filesystems(
             file_logger,
             &timer,
         ) {
-            let err_str = e.to_string();
-            if err_str.contains("EINVAL") || err_str.contains("ENOENT") {
-                log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Skipped mount {}: {}", target, e));
+            let level = if e.to_string().contains("EINVAL") || e.to_string().contains("ENOENT") {
+                LogLevel::Warn
             } else {
-                log_error(console_logger, file_logger, &timer, LogLevel::Fail, &format!("Failed to mount {}: {}", target, e));
-            }
+                LogLevel::Fail
+            };
+            log_error(console_logger, file_logger, &timer, level, &format!("Mount failed for {}: {}", target, e));
         }
     }
 
@@ -146,26 +126,31 @@ pub fn mount_fstab_filesystems(
 /// Resolve UUID= or LABEL= sources to device paths
 /// For pseudo-filesystems like tmpfs, proc, etc., return as-is.
 fn resolve_source(source: &str) -> Result<String, BloomError> {
-    // Pseudo-filesystems should be passed through untouched
-    let pseudo_fs = ["tmpfs", "proc", "sysfs", "devpts", "devtmpfs", "cgroup", "cgroup2"];
-    if pseudo_fs.contains(&source) {
+    if source.starts_with("UUID=") {
+        return resolve_symlink_target("/dev/disk/by-uuid", &source[5..]);
+    }
+    if source.starts_with("LABEL=") {
+        return resolve_symlink_target("/dev/disk/by-label", &source[6..]);
+    }
+
+    // Pseudo-filesystems or filesystems like tmpfs, proc, etc.
+    if source.starts_with("tmpfs")
+        || source.starts_with("proc")
+        || source.starts_with("sysfs")
+        || source.starts_with("dev")
+        || source == "none"
+    {
         return Ok(source.to_string());
     }
 
-    if let Some(uuid) = source.strip_prefix("UUID=") {
-        resolve_symlink_target("/dev/disk/by-uuid", uuid)
-    } else if let Some(label) = source.strip_prefix("LABEL=") {
-        resolve_symlink_target("/dev/disk/by-label", label)
+    let path = Path::new(source);
+    if path.exists() {
+        Ok(source.to_string())
     } else {
-        // Normal device path (e.g. /dev/sda1)
-        let path = Path::new(source);
-        if path.exists() {
-            Ok(source.to_string())
-        } else {
-            Err(BloomError::Custom(format!("Device {} does not exist", source)))
-        }
+        Err(BloomError::Custom(format!("Device {} does not exist", source)))
     }
 }
+
 
 
 fn resolve_symlink_target(base_dir: &str, name: &str) -> Result<String, BloomError> {
