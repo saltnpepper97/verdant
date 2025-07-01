@@ -5,7 +5,7 @@ use bloom::time::SystemTimer;
 use crate::device_manager::{monitor_udev_events, start_device_manager};
 use crate::env::set_basic_env_vars;
 use crate::fs::{mount_virtual_filesystems, mount_securityfs};
-use crate::hardware_drivers::check_hardware_drivers;
+use crate::hardware_drivers::load_hardware_drivers;
 use crate::kernel::{apply_sysctl_settings, load_kernel_modules};
 use crate::mount::{check_filesystem_health, mount_fstab_filesystems, remount_root};
 use crate::network::setup_loopback;
@@ -32,7 +32,7 @@ pub fn boot() -> (ConsoleLoggerImpl, FileLoggerImpl, SystemTimer) {
     let _ = start_device_manager(&mut console_logger, &mut file_logger);
     let _ = monitor_udev_events(&mut file_logger);
 
-    let _ = check_hardware_drivers(&mut console_logger, &mut file_logger);
+    let _ = load_hardware_drivers(&mut console_logger, &mut file_logger);
 
     let _ = check_filesystem_health(&mut console_logger, &mut file_logger);
 
