@@ -1,10 +1,10 @@
 use std::os::unix::io::AsRawFd;
-use std::mem::{zeroed};
+use std::mem::{zeroed, size_of};
 use std::time::Duration;
 use std::thread::sleep;
 
 use nix::sys::socket::{socket, AddressFamily, SockType, SockFlag};
-use nix::libc::{sockaddr_in, AF_INET, sockaddr, in_addr, c_char, c_short, self};
+use nix::libc::{sockaddr_in, AF_INET, sockaddr, in_addr, c_char, self};
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -39,7 +39,6 @@ pub fn setup_loopback(
     Ok(())
 }
 
-
 /// Bring up interface using ioctl SIOCSIFFLAGS
 fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError> {
 
@@ -48,7 +47,7 @@ fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError>
     #[derive(Copy, Clone)]
     struct Ifreq {
         ifr_name: [c_char; libc::IFNAMSIZ],
-        ifr_flags: c_short,
+        ifr_flags: libc::c_short, // keep c_short here, musl compatible
         _pad: [u8; 24], // padding for rest of union, to size 40 bytes total
     }
 
@@ -66,7 +65,7 @@ fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError>
     }
 
     // Set IFF_UP flag
-    const IFF_UP: c_short = 0x1;
+    const IFF_UP: libc::c_short = 0x1;
     ifr.ifr_flags |= IFF_UP;
 
     // Set flags back
@@ -82,7 +81,6 @@ fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError>
 /// Assign 127.0.0.1/8 IP address to lo interface
 fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomError> {
 
-    // Define ifreq_addr struct for ioctl SIOCSIFADDR
     #[repr(C)]
     #[derive(Copy, Clone)]
     struct IfreqAddr {
@@ -93,18 +91,19 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
     // Prepare sockaddr_in for 127.0.0.1
     let mut addr_in: sockaddr_in = unsafe { zeroed() };
     addr_in.sin_family = AF_INET as u16;
+
+    // IMPORTANT: s_addr is in network byte order (big endian)
+    // musl expects it as u32 in network byte order; use u32::from_be_bytes + u32::to_be()
     addr_in.sin_addr = in_addr {
-        s_addr: u32::from_be_bytes([127, 0, 0, 1]).to_be(),
+        s_addr: u32::from_be_bytes([127, 0, 0, 1]),
     };
 
-    // Copy sockaddr_in into sockaddr
     let mut ifr: IfreqAddr = unsafe { zeroed() };
     for (dst, src) in ifr.ifr_name.iter_mut().zip(ifname.bytes()) {
         *dst = src as c_char;
     }
 
     unsafe {
-        // Copy sockaddr_in bytes into sockaddr
         std::ptr::copy_nonoverlapping(
             &addr_in as *const sockaddr_in as *const u8,
             &mut ifr.ifr_addr as *mut sockaddr as *mut u8,
@@ -112,7 +111,6 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
         );
     }
 
-    // Call ioctl to set address
     unsafe {
         if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCSIFADDR failed for {}", ifname)));
@@ -121,3 +119,4 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
 
     Ok(())
 }
+
