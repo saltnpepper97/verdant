@@ -50,11 +50,11 @@ fn reboot_syscall(cmd: i32) -> io::Result<()> {
 
     const LINUX_REBOOT_MAGIC1: libc::c_int = 0xfee1_dead_u32 as libc::c_int;
     const LINUX_REBOOT_MAGIC2: libc::c_int = 672274793;
-    const SYS_reboot: libc::c_long = 169; // syscall number for reboot on x86_64 Linux
+    const SYS_REBOOT: libc::c_long = 169; // syscall number for reboot on x86_64 Linux
 
     let res = unsafe {
         libc::syscall(
-            SYS_reboot,
+            SYS_REBOOT,
             LINUX_REBOOT_MAGIC1,
             LINUX_REBOOT_MAGIC2,
             cmd,
