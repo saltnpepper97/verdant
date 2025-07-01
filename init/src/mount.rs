@@ -55,6 +55,7 @@ pub fn mount_fstab_filesystems(
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
     let fstab = File::open("/etc/fstab").map_err(BloomError::Io)?;
+
     for line in BufReader::new(fstab).lines() {
         let line = line.map_err(BloomError::Io)?.trim().to_string();
         if line.is_empty() || line.starts_with('#') {
@@ -72,7 +73,30 @@ pub fn mount_fstab_filesystems(
         let fstype = fields[2];
         let options = fields[3];
 
+        // Skip mounting if 'noauto' is present
+        if options.split(',').any(|opt| opt == "noauto") {
+            log_success(console_logger, file_logger, &timer, LogLevel::Info, &format!("Skipping noauto mount: {}", target));
+            continue;
+        }
+
+        // Skip root (already mounted)
         if target == "/" {
+            continue;
+        }
+
+        // Ensure mount point exists
+        let target_path = Path::new(target);
+        if !target_path.exists() {
+            if let Err(e) = fs::create_dir_all(target_path) {
+                log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Failed to create mount point {}: {}", target, e));
+                continue;
+            }
+        }
+
+        // Skip if source device does not exist (for media devices)
+        if source.starts_with("/dev/") && !Path::new(source).exists() {
+            log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!(
+                "Device {} not found, skipping mount of {}", source, target));
             continue;
         }
 
@@ -89,12 +113,19 @@ pub fn mount_fstab_filesystems(
             file_logger,
             &timer,
         ) {
-            log_error(console_logger, file_logger, &timer, LogLevel::Fail, &format!("Failed to mount {}: {:?}", target, e));
+            // Demote EINVAL and ENOENT (missing media or unsupported fs) to warnings
+            let kind = e.to_string();
+            if kind.contains("EINVAL") || kind.contains("ENOENT") {
+                log_error(console_logger, file_logger, &timer, LogLevel::Warn, &format!("Skipped mount {}: {}", target, e));
+            } else {
+                log_error(console_logger, file_logger, &timer, LogLevel::Fail, &format!("Failed to mount {}: {}", target, e));
+            }
         }
     }
 
     Ok(())
 }
+
 
 fn parse_mount_flags(options: &str) -> MsFlags {
     let mut flags = MsFlags::empty();
