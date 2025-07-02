@@ -7,4 +7,6 @@ args: -c /etc/wpa_supplicant/wpa_supplicant.conf -i wlan0 -B
 restart: always
 restart-delay: 3
 
+priority: 40
+
 tags: net, wifi
