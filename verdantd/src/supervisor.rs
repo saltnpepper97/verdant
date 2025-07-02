@@ -16,7 +16,6 @@ pub struct Supervisor {
     pub child: Option<Child>,
     pub restart_count: u32,
     pub last_start: Option<Instant>,
-
     pub state: ServiceState,
 
     console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
@@ -66,8 +65,6 @@ impl Supervisor {
 
             self.state = ServiceState::Stopping;
             stop_service(&self.service, child.id(), &mut *con, &mut *file)?;
-            self.child = None;
-            self.state = ServiceState::Stopped;
             Ok(())
         } else {
             Err(BloomError::Custom(format!(
@@ -91,12 +88,7 @@ impl Supervisor {
         result
     }
 
-    pub fn supervise_loop(
-        &mut self,
-        shutdown_flag: Arc<AtomicBool>,
-    ) -> Result<(), BloomError> {
-        let mut last_state = self.state;
-
+    pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
         if self.child.is_none() {
             self.state = ServiceState::Starting;
             if let Err(e) = self.start() {
@@ -107,168 +99,107 @@ impl Supervisor {
 
         loop {
             if shutdown_flag.load(Ordering::SeqCst) {
-                {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(LogLevel::Info, &format!(
-                        "Shutdown flag detected. Attempting graceful stop of '{}'", self.service.name
-                    ));
-                }
-
-                // Signal stop to service
                 let _ = self.shutdown();
 
-                // Actively wait for child to exit with timeout, forcibly kill if needed
-                let timeout = Duration::from_secs(5);
-                let start = Instant::now();
-
-                loop {
-                    match self.child.as_mut() {
-                        Some(child) => match child.try_wait() {
-                            Ok(Some(_status)) => {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline {
+                    if let Some(child) = &mut self.child {
+                        match child.try_wait() {
+                            Ok(Some(_)) => {
                                 self.child = None;
                                 self.state = ServiceState::Stopped;
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(LogLevel::Info, &format!(
-                                    "Service '{}' stopped cleanly on shutdown.", self.service.name
-                                ));
                                 break;
                             }
-                            Ok(None) => {
-                                if start.elapsed() > timeout {
-                                    let mut file = self.file_logger.lock().unwrap();
-                                    file.log(LogLevel::Warn, &format!(
-                                        "Timeout waiting for service '{}' to stop; sending SIGKILL", self.service.name
-                                    ));
-
-                                    // Force kill the child process
-                                    #[cfg(unix)]
-                                    {
-                                        use nix::sys::signal::{kill, Signal};
-                                        use nix::unistd::Pid;
-
-                                        let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
-                                    }
-                                    #[cfg(windows)]
-                                    {
-                                        // Windows alternative: forcibly kill process
-                                        let _ = child.kill();
-                                    }
-
-                                    thread::sleep(Duration::from_millis(200));
-                                } else {
-                                    thread::sleep(Duration::from_millis(100));
-                                }
-                            }
-                            Err(e) => {
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(LogLevel::Fail, &format!(
-                                    "Error waiting for service '{}': {}", self.service.name, e
-                                ));
-                                break;
-                            }
-                        },
-                        None => break,
+                            Ok(None) => thread::sleep(Duration::from_millis(100)),
+                            Err(_) => break,
+                        }
+                    } else {
+                        break;
                     }
                 }
 
-                break; // exit supervise_loop after shutdown completes
+                if self.child.is_some() {
+                    {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(LogLevel::Warn, &format!(
+                            "Service '{}' did not stop in time. Sending SIGKILL.", self.service.name
+                        ));
+                    }
+
+                    #[cfg(unix)]
+                    {
+                        use nix::sys::signal::{kill, Signal};
+                        use nix::unistd::Pid;
+                        let _ = kill(Pid::from_raw(self.child.as_ref().unwrap().id() as i32), Signal::SIGKILL);
+                    }
+
+                    #[cfg(windows)]
+                    {
+                        let _ = self.child.as_mut().unwrap().kill();
+                    }
+
+                    thread::sleep(Duration::from_millis(300));
+                    self.child = None;
+                    self.state = ServiceState::Stopped;
+                }
+
+                return Ok(());
             }
 
-            let current_state = match self.child.as_mut() {
-                Some(child) => match child.try_wait() {
+            if let Some(child) = &mut self.child {
+                match child.try_wait() {
                     Ok(Some(status)) => {
+                        self.child = None;
+
                         {
                             let mut file = self.file_logger.lock().unwrap();
-                            let msg = format!(
-                                "Service '{}' exited with status {}",
-                                self.service.name, status
-                            );
-                            file.log(LogLevel::Warn, &msg);
+                            file.log(LogLevel::Warn, &format!(
+                                "Service '{}' exited with status {}", self.service.name, status
+                            ));
                         }
-
-                        self.child = None;
 
                         match self.service.restart {
                             RestartPolicy::Always => {
                                 self.restart_count += 1;
                                 if let Some(delay) = self.service.restart_delay {
-                                    if delay > 0 {
-                                        thread::sleep(Duration::from_secs(delay));
-                                    }
+                                    thread::sleep(Duration::from_secs(delay));
                                 }
-
-                                if shutdown_flag.load(Ordering::SeqCst) {
-                                    let _ = self.shutdown();
-                                    break;
-                                }
-
-                                self.state = ServiceState::Starting;
-                                if let Err(e) = self.start() {
-                                    self.state = ServiceState::Failed;
-                                    return Err(e);
-                                }
-                                ServiceState::Starting
+                                self.start()?;
                             }
                             RestartPolicy::OnFailure => {
                                 if !status.success() {
                                     self.restart_count += 1;
                                     if let Some(delay) = self.service.restart_delay {
-                                        if delay > 0 {
-                                            thread::sleep(Duration::from_secs(delay));
-                                        }
+                                        thread::sleep(Duration::from_secs(delay));
                                     }
-
-                                    if shutdown_flag.load(Ordering::SeqCst) {
-                                        let _ = self.shutdown();
-                                        break;
-                                    }
-
-                                    self.state = ServiceState::Starting;
-                                    if let Err(e) = self.start() {
-                                        self.state = ServiceState::Failed;
-                                        return Err(e);
-                                    }
-                                    ServiceState::Starting
+                                    self.start()?;
                                 } else {
-                                    break;
+                                    self.state = ServiceState::Stopped;
+                                    return Ok(());
                                 }
                             }
-                            RestartPolicy::Never => break,
+                            RestartPolicy::Never => {
+                                self.state = ServiceState::Stopped;
+                                return Ok(());
+                            }
                         }
                     }
                     Ok(None) => {
                         if self.state == ServiceState::Starting {
-                            ServiceState::Running
-                        } else {
-                            self.state
+                            self.state = ServiceState::Running;
                         }
                     }
                     Err(e) => {
                         self.state = ServiceState::Failed;
                         return Err(BloomError::Custom(format!(
-                            "Failed to wait for service {}: {}",
-                            self.service.name, e
+                            "Failed to wait on service '{}': {}", self.service.name, e
                         )));
                     }
-                },
-                None => break,
-            };
-
-            if current_state != last_state {
-                let mut file = self.file_logger.lock().unwrap();
-                let msg = format!(
-                    "Service '{}' state changed: {:?} → {:?}",
-                    self.service.name, last_state, current_state
-                );
-                file.log(LogLevel::Info, &msg);
-                last_state = current_state;
+                }
             }
 
-            self.state = current_state;
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(250));
         }
-
-        Ok(())
     }
 }
 
