@@ -54,7 +54,16 @@ pub fn parse_service_file(
         // Handle list values by indentation (2+ spaces or tab)
         if line.starts_with("  ") || line.starts_with('\t') {
             if let Some(ref key) = current_key {
-                let val = line.trim_start_matches('-').trim();
+                let val = match key.as_str() {
+                    "instances" => {
+                        // Explicit type annotation on closure param to satisfy compiler
+                        line.trim_start_matches(|c: char| c == '-' || c.is_whitespace()).trim_end()
+                    }
+                    _ => {
+                        line.trim_start_matches('-').trim()
+                    }
+                };
+
                 match key.as_str() {
                     "env" => {
                         if let Some(ref mut env_vec) = service.env {
