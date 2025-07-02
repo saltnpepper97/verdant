@@ -117,7 +117,10 @@ impl Supervisor {
                 // Signal stop to service
                 let _ = self.shutdown();
 
-                // Actively wait for child to exit to avoid premature exit of supervise loop
+                // Actively wait for child to exit with timeout, forcibly kill if needed
+                let timeout = Duration::from_secs(5);
+                let start = Instant::now();
+
                 loop {
                     match self.child.as_mut() {
                         Some(child) => match child.try_wait() {
@@ -131,8 +134,30 @@ impl Supervisor {
                                 break;
                             }
                             Ok(None) => {
-                                // Child still running, wait and retry
-                                thread::sleep(Duration::from_millis(100));
+                                if start.elapsed() > timeout {
+                                    let mut file = self.file_logger.lock().unwrap();
+                                    file.log(LogLevel::Warn, &format!(
+                                        "Timeout waiting for service '{}' to stop; sending SIGKILL", self.service.name
+                                    ));
+
+                                    // Force kill the child process
+                                    #[cfg(unix)]
+                                    {
+                                        use nix::sys::signal::{kill, Signal};
+                                        use nix::unistd::Pid;
+
+                                        let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+                                    }
+                                    #[cfg(windows)]
+                                    {
+                                        // Windows alternative: forcibly kill process
+                                        let _ = child.kill();
+                                    }
+
+                                    thread::sleep(Duration::from_millis(200));
+                                } else {
+                                    thread::sleep(Duration::from_millis(100));
+                                }
                             }
                             Err(e) => {
                                 let mut file = self.file_logger.lock().unwrap();

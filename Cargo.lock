@@ -710,6 +710,7 @@ name = "verdantd"
 version = "0.1.0"
 dependencies = [
  "bloom",
+ "libc",
  "nix",
  "serde",
  "serde_json",

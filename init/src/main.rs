@@ -42,11 +42,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    if is_test {
-        eprintln!("Test mode detected, skipping full init.");
-        return;
-    }
-
     let result = std::panic::catch_unwind(inner_main);
 
     if result.is_err() {
