@@ -11,6 +11,7 @@ mod run;
 mod seed;
 mod service_manager;
 mod signal;
+mod unmount;
 mod utils;
 
 
@@ -31,7 +32,7 @@ use bloom::log::{ConsoleLogger, FileLogger};
 use bloom::status::LogLevel;
 use bloom::ipc::INIT_SOCKET_PATH;
 
-use crate::service_manager::launch_verdant_service_manager;
+use crate::{service_manager::launch_verdant_service_manager};
 
 fn main() {
     let is_test = args().any(|arg| arg == "test");
@@ -128,6 +129,11 @@ fn inner_main() {
     loop {
         if reboot_flag.load(Ordering::SeqCst) {
             log_shutdown(&console_logger, &file_logger, "Reboot");
+            
+            if let (Ok(mut con), Ok(mut file)) = (console_logger.lock(), file_logger.lock()) {
+                let _ = unmount::unmount_fstab_filesystems(&mut *con, &mut *file);
+            }
+
             remove_init_socket(&file_logger);
             let _ = actions::reboot();
             break;
@@ -135,6 +141,11 @@ fn inner_main() {
 
         if shutdown_flag.load(Ordering::SeqCst) {
             log_shutdown(&console_logger, &file_logger, "Shutdown");
+
+            if let (Ok(mut con), Ok(mut file)) = (console_logger.lock(), file_logger.lock()) {
+                let _ = unmount::unmount_fstab_filesystems(&mut *con, &mut *file);
+            }
+  
             remove_init_socket(&file_logger);
             let _ = actions::shutdown();
             break;

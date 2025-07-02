@@ -1,5 +1,5 @@
-use std::fs::{create_dir_all, File};
-use std::io::{BufRead, BufReader};
+use std::fs::{self, create_dir_all};
+use std::io::BufRead;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -107,17 +107,22 @@ pub fn mount_fs(
 
 /// Check if the target is mounted by parsing `/proc/self/mountinfo`
 fn is_mounted(target: &str) -> Result<bool, BloomError> {
-    let file = File::open("/proc/self/mountinfo")?;
-    for line in BufReader::new(file).lines() {
+    let target_canonical = fs::canonicalize(target).unwrap_or_else(|_| std::path::PathBuf::from(target));
+
+    let file = std::fs::File::open("/proc/self/mountinfo")?;
+    for line in std::io::BufReader::new(file).lines() {
         let line = line?;
-        if let Some(mount_point) = line.split_whitespace().nth(4) {
-            if mount_point == target {
+        if let Some(mount_point_str) = line.split_whitespace().nth(4) {
+            let mount_point_canonical = fs::canonicalize(mount_point_str).unwrap_or_else(|_| std::path::PathBuf::from(mount_point_str));
+
+            if mount_point_canonical == target_canonical {
                 return Ok(true);
             }
         }
     }
     Ok(false)
 }
+
 
 fn ensure_dir(
     path: &str,
