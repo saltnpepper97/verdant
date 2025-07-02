@@ -48,13 +48,14 @@ impl Supervisor {
         }
 
         self.state = ServiceState::Starting;
-        let mut file = self.file_logger.lock().unwrap();
-        let launch_result = start_service(&self.service, &mut *file)?;
-        drop(file);
-
-        self.child = Some(launch_result.child);
-        self.last_start = Some(launch_result.start_time);
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            let launch_result = start_service(&self.service, &mut *file)?;
+            self.child = Some(launch_result.child);
+            self.last_start = Some(launch_result.start_time);
+        }
         self.restart_count = 0;
+
         Ok(())
     }
 
@@ -78,42 +79,35 @@ impl Supervisor {
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        let result = self.stop();
+        let _ = self.stop(); // Always try to stop
+        self.state = ServiceState::Stopped;
 
         let mut file = self.file_logger.lock().unwrap();
-        let msg = if result.is_ok() {
-            format!("Supervisor shutdown: '{}'", self.service.name)
-        } else {
-            format!("Supervisor shutdown failed: '{}'", self.service.name)
-        };
-        file.log(LogLevel::Info, &msg);
+        file.log(
+            LogLevel::Info,
+            &format!("Supervisor shutdown: '{}'", self.service.name),
+        );
 
-        result
+        Ok(())
     }
 
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
         let mut last_state = self.state;
 
         if self.child.is_none() {
-            self.state = ServiceState::Starting;
-            if let Err(e) = self.start() {
-                self.state = ServiceState::Failed;
-                return Err(e);
+            if !self.is_tty_logged_in() {
+                if let Err(e) = self.start() {
+                    self.state = ServiceState::Failed;
+                    return Err(e);
+                }
+                self.state = ServiceState::Starting;
+            } else {
+                self.state = ServiceState::Stopped;
             }
         }
 
         loop {
             if shutdown_flag.load(Ordering::SeqCst) {
-                let mut file = self.file_logger.lock().unwrap();
-                file.log(
-                    LogLevel::Info,
-                    &format!(
-                        "Shutdown flag detected. Attempting graceful stop of '{}'",
-                        self.service.name
-                    ),
-                );
-                drop(file);
-
                 let _ = self.shutdown();
                 self.wait_for_exit_with_timeout(Duration::from_secs(5));
                 break;
@@ -124,67 +118,61 @@ impl Supervisor {
                     Ok(Some(status)) => {
                         self.child = None;
 
-                        let mut file = self.file_logger.lock().unwrap();
-                        file.log(
-                            LogLevel::Warn,
-                            &format!(
-                                "Service '{}' exited with status {}",
-                                self.service.name, status
-                            ),
-                        );
-                        drop(file);
-
-                        if shutdown_flag.load(Ordering::SeqCst) {
-                            break;
+                        {
+                            let mut file = self.file_logger.lock().unwrap();
+                            file.log(
+                                LogLevel::Warn,
+                                &format!(
+                                    "Service '{}' exited with status {}",
+                                    self.service.name, status
+                                ),
+                            );
                         }
 
-                        match self.service.restart {
-                            RestartPolicy::Always => {
-                                if is_tty_logged_in(&self.service.name) {
-                                    self.state = ServiceState::Stopped;
-                                    let mut file = self.file_logger.lock().unwrap();
-                                    file.log(
-                                        LogLevel::Info,
-                                        &format!(
-                                            "Service '{}' is logged in. Delaying restart.",
-                                            self.service.name
-                                        ),
-                                    );
-                                    drop(file);
-                                    // Retry in next loop iteration
-                                    ServiceState::Stopped
-                                } else {
-                                    self.restart_count += 1;
-                                    if let Some(delay) = self.service.restart_delay {
-                                        thread::sleep(Duration::from_secs(delay));
-                                    }
-
-                                    self.state = ServiceState::Starting;
-                                    if let Err(e) = self.start() {
-                                        self.state = ServiceState::Failed;
-                                        return Err(e);
-                                    }
-                                    ServiceState::Starting
+                        if shutdown_flag.load(Ordering::SeqCst) {
+                            ServiceState::Stopped
+                        } else if self.service.restart == RestartPolicy::Always {
+                            if self.is_tty_logged_in() {
+                                let mut file = self.file_logger.lock().unwrap();
+                                file.log(
+                                    LogLevel::Info,
+                                    &format!(
+                                        "TTY '{}' still has user logged in. Delaying restart.",
+                                        self.service.name
+                                    ),
+                                );
+                                ServiceState::Stopped
+                            } else {
+                                if let Some(delay) = self.service.restart_delay {
+                                    thread::sleep(Duration::from_secs(delay));
                                 }
-                            }
-                            RestartPolicy::OnFailure => {
-                                if !status.success() {
-                                    self.restart_count += 1;
-                                    if let Some(delay) = self.service.restart_delay {
-                                        thread::sleep(Duration::from_secs(delay));
-                                    }
 
-                                    self.state = ServiceState::Starting;
-                                    if let Err(e) = self.start() {
-                                        self.state = ServiceState::Failed;
-                                        return Err(e);
-                                    }
-                                    ServiceState::Starting
-                                } else {
-                                    ServiceState::Stopped
+                                // Drop file lock *before* mutable borrow for start()
+                                drop(self.file_logger.lock().unwrap());
+
+                                if let Err(e) = self.start() {
+                                    self.state = ServiceState::Failed;
+                                    return Err(e);
                                 }
+                                ServiceState::Starting
                             }
-                            RestartPolicy::Never => ServiceState::Stopped,
+                        } else if self.service.restart == RestartPolicy::OnFailure
+                            && !status.success()
+                        {
+                            if let Some(delay) = self.service.restart_delay {
+                                thread::sleep(Duration::from_secs(delay));
+                            }
+
+                            // Drop file lock *before* mutable borrow for start()
+                            drop(self.file_logger.lock().unwrap());
+
+                            if let Err(e) = self.start() {
+                                self.state = ServiceState::Failed;
+                                return Err(e);
+                            }
+                            ServiceState::Starting
+                        } else {
+                            ServiceState::Stopped
                         }
                     }
                     Ok(None) => {
@@ -195,36 +183,29 @@ impl Supervisor {
                         }
                     }
                     Err(e) => {
-                        self.state = ServiceState::Failed;
                         return Err(BloomError::Custom(format!(
-                            "Failed to wait for service {}: {}",
+                            "Failed to wait for service '{}': {}",
                             self.service.name, e
                         )));
                     }
                 },
                 None => {
-                    // No child, maybe eligible for restart (e.g. tty after logout)
-                    if self.service.restart == RestartPolicy::Always
-                        && !is_tty_logged_in(&self.service.name)
-                    {
-                        let mut file = self.file_logger.lock().unwrap();
-                        file.log(
-                            LogLevel::Info,
-                            &format!(
-                                "Restarting service '{}' after logout.",
-                                self.service.name
-                            ),
-                        );
-                        drop(file);
+                    if self.service.restart == RestartPolicy::Always && !self.is_tty_logged_in() {
+                        {
+                            let mut file = self.file_logger.lock().unwrap();
+                            file.log(
+                                LogLevel::Info,
+                                &format!("Restarting '{}' after logout.", self.service.name),
+                            );
+                        }
 
-                        self.state = ServiceState::Starting;
                         if let Err(e) = self.start() {
                             self.state = ServiceState::Failed;
                             return Err(e);
                         }
                         ServiceState::Starting
                     } else {
-                        self.state
+                        ServiceState::Stopped
                     }
                 }
             };
@@ -256,64 +237,39 @@ impl Supervisor {
                     Ok(Some(_)) => {
                         self.child = None;
                         self.state = ServiceState::Stopped;
-
-                        let mut file = self.file_logger.lock().unwrap();
-                        file.log(
-                            LogLevel::Info,
-                            &format!("Service '{}' stopped cleanly on shutdown.", self.service.name),
-                        );
                         break;
                     }
                     Ok(None) => {
                         if start.elapsed() > timeout {
-                            let mut file = self.file_logger.lock().unwrap();
-                            file.log(
-                                LogLevel::Warn,
-                                &format!(
-                                    "Timeout waiting for service '{}' to stop; sending SIGKILL",
-                                    self.service.name
-                                ),
-                            );
-
                             #[cfg(unix)]
                             {
                                 use nix::sys::signal::{kill, Signal};
                                 use nix::unistd::Pid;
                                 let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                             }
-
                             thread::sleep(Duration::from_millis(200));
+                            self.child = None;
+                            self.state = ServiceState::Stopped;
                             break;
                         } else {
                             thread::sleep(Duration::from_millis(100));
                         }
                     }
-                    Err(e) => {
-                        let mut file = self.file_logger.lock().unwrap();
-                        file.log(
-                            LogLevel::Fail,
-                            &format!(
-                                "Error waiting for service '{}': {}",
-                                self.service.name, e
-                            ),
-                        );
-                        break;
-                    }
+                    Err(_) => break,
                 },
                 None => break,
             }
         }
     }
-}
 
-/// Check if a tty@ service name (e.g., tty@tty1) has a logged-in user
-fn is_tty_logged_in(service_name: &str) -> bool {
-    if let Some(tty_name) = service_name.strip_prefix("tty@") {
-        let path = format!("/dev/{}", tty_name);
-        if let Ok(output) = Command::new("fuser").arg(&path).output() {
-            return !output.stdout.is_empty();
+    fn is_tty_logged_in(&self) -> bool {
+        if let Some(tty_name) = self.service.name.strip_prefix("tty@") {
+            let path = format!("/dev/{}", tty_name);
+            if let Ok(output) = Command::new("fuser").arg(&path).output() {
+                return !output.stdout.is_empty();
+            }
         }
+        false
     }
-    false
 }
 
