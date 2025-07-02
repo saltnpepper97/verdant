@@ -11,7 +11,7 @@ use crate::filesystem::{mount_virtual_filesystems, mount_securityfs};
 use crate::hardware_drivers::load_hardware_drivers;
 use crate::kernel::{apply_sysctl_settings, load_kernel_modules};
 use crate::mount::{check_filesystem_health, mount_fstab_filesystems, remount_root};
-use crate::network::setup_loopback;
+use crate::network::setup_networks;
 use crate::seed::seed_entropy;
 use crate::utils::{detect_timezone, set_hostname, sync_clock_from_hardware};
 
@@ -74,7 +74,7 @@ pub fn boot() -> (
         let _ = seed_entropy(&mut *con_log, &mut *file_log);
         let _ = sync_clock_from_hardware(&mut *con_log, &mut *file_log);
         let _ = set_basic_env_vars(&mut *con_log, &mut *file_log);
-        let _ = setup_loopback(&mut *con_log, &mut *file_log);
+        let _ = setup_networks(&mut *con_log, &mut *file_log);
     }
 
     (console_logger, file_logger, start_time)

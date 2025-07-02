@@ -8,3 +8,5 @@ startup-package: network
 
 restart: on-failure
 restart-delay: 3
+
+tags: dhcp, net

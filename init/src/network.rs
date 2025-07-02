@@ -3,6 +3,7 @@ use std::mem::{zeroed, size_of};
 use std::time::Duration;
 use std::thread::sleep;
 use std::convert::TryInto;
+use std::fs;
 
 use nix::sys::socket::{socket, AddressFamily, SockType, SockFlag};
 use nix::libc::{sockaddr_in, AF_INET, sockaddr, in_addr, c_char};
@@ -12,8 +13,8 @@ use bloom::log::{ConsoleLogger, FileLogger};
 use bloom::status::LogLevel;
 use bloom::time::ProcessTimer;
 
-/// Setup the loopback interface `lo`
-pub fn setup_loopback(
+/// Setup loopback + bring all non-virtual interfaces up
+pub fn setup_networks(
     console_logger: &mut dyn ConsoleLogger,
     file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
@@ -23,20 +24,58 @@ pub fn setup_loopback(
         .map_err(|e| BloomError::Custom(format!("Failed to open socket: {}", e)))?;
     let raw_sock = sock.as_raw_fd();
 
+    setup_loopback_internal(raw_sock, console_logger, file_logger)?;
+
+    if let Ok(entries) = fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            if let Ok(ifname_os) = entry.file_name().into_string() {
+                let ifname = ifname_os.as_str();
+
+                if ifname == "lo"
+                    || ifname.starts_with("veth")
+                    || ifname.starts_with("br")
+                    || ifname.starts_with("docker")
+                    || ifname.starts_with("tap")
+                    || ifname.starts_with("tun")
+                {
+                    continue;
+                }
+
+                if is_interface_up(raw_sock, ifname)? {
+                    let msg = format!("Interface {} already up", ifname);
+                    console_logger.message(LogLevel::Info, &msg, timer.elapsed());
+                    file_logger.log(LogLevel::Info, &msg);
+                } else {
+                    bring_interface_up(raw_sock, ifname)?;
+                    let msg = format!("Brought up interface {}", ifname);
+                    console_logger.message(LogLevel::Ok, &msg, timer.elapsed());
+                    file_logger.log(LogLevel::Ok, &msg);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn setup_loopback_internal(
+    raw_sock: libc::c_int,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
+) -> Result<(), BloomError> {
     if is_interface_up(raw_sock, "lo")? {
         let msg = "Loopback interface already up";
-        console_logger.message(LogLevel::Info, msg, timer.elapsed());
+        console_logger.message(LogLevel::Info, msg, Duration::ZERO);
         file_logger.log(LogLevel::Info, msg);
         return Ok(());
     }
 
     bring_interface_up(raw_sock, "lo")?;
     assign_loopback_address(raw_sock, "lo")?;
-
     sleep(Duration::from_millis(100));
 
     let msg = "Loopback interface configured";
-    console_logger.message(LogLevel::Ok, msg, timer.elapsed());
+    console_logger.message(LogLevel::Ok, msg, Duration::ZERO);
     file_logger.log(LogLevel::Ok, msg);
 
     Ok(())

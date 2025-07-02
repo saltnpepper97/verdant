@@ -7,3 +7,5 @@ startup-package: base
 
 restart: on-failure
 restart-delay: 3
+
+tags: cron

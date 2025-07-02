@@ -8,4 +8,4 @@ startup-package: base
 restart: on-failure
 restart-delay: 1
 
-tags: sys
+tags: sys, log
