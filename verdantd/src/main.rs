@@ -78,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ipc_ready_rx.recv().expect("Failed to receive IPC ready signal");
 
     {
-        let banner = "\nBoot process complete. Breathe in. Log in.\n\n";
+        let banner = "\nBoot process complete. Breathe in. Log in.";
         let mut con = console_logger.lock().unwrap();
         con.banner(banner);
     }
