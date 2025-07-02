@@ -96,7 +96,6 @@ fn handle_client(
             // Delay flag set/unpark to avoid blocking client
             let shutdown_flag_clone = Arc::clone(&shutdown_flag);
             thread::spawn(move || {
-                thread::sleep(std::time::Duration::from_secs(1));
                 shutdown_flag_clone.store(true, Ordering::SeqCst);
                 main_thread.unpark();
             });
@@ -113,7 +112,6 @@ fn handle_client(
             // Delay flag set/unpark to avoid blocking client
             let reboot_flag_clone = Arc::clone(&reboot_flag);
             thread::spawn(move || {
-                thread::sleep(std::time::Duration::from_millis(500));
                 reboot_flag_clone.store(true, Ordering::SeqCst);
                 main_thread.unpark();
             });

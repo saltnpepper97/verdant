@@ -17,8 +17,16 @@ pub fn install_signal_handlers(
     console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
     main_thread: std::thread::Thread,
 ) -> Result<(), BloomError> {
-    // Added SIGPWR for ACPI power events
-    let mut signals = Signals::new(&[SIGCHLD, SIGTERM, SIGPWR]) // Ignore SIGINT (Ctrl+C)
+    let handled_signals = &[
+        SIGCHLD,
+        SIGTERM,
+        SIGINT,
+        SIGPWR,
+        SIGUSR1, // reboot
+        SIGUSR2, // halt
+    ];
+
+    let mut signals = Signals::new(handled_signals)
         .map_err(|e| BloomError::Custom(format!("Failed to register signals: {e}")))?;
 
     thread::spawn(move || {
@@ -47,25 +55,43 @@ pub fn install_signal_handlers(
                         }
                     }
                 }
-                SIGTERM | SIGPWR => {
-                    let msg = if signal == SIGTERM {
-                        "Received SIGTERM, scheduling shutdown".to_string()
-                    } else {
-                        "Received SIGPWR (ACPI power event), scheduling shutdown".to_string()
+
+                SIGTERM | SIGINT | SIGPWR | SIGUSR2 => {
+                    let msg = match signal {
+                        SIGTERM => "Received SIGTERM",
+                        SIGINT => "Received SIGINT",
+                        SIGPWR => "Received SIGPWR (ACPI power event)",
+                        SIGUSR2 => "Received SIGUSR2 (halt request)",
+                        _ => "Received shutdown signal",
                     };
 
                     if let Ok(mut log) = file_logger.lock() {
-                        log.log(LogLevel::Warn, &msg);
+                        log.log(LogLevel::Warn, &format!("{}, scheduling shutdown", msg));
                     }
                     if let Ok(mut con) = console_logger.lock() {
-                        con.message(LogLevel::Warn, &msg, timer.elapsed());
+                        con.message(LogLevel::Warn, &format!("{}, scheduling shutdown", msg), timer.elapsed());
                     }
 
                     shutdown_flag.store(true, Ordering::SeqCst);
                     main_thread.unpark();
-
                     break;
                 }
+
+                SIGUSR1 => {
+                    let msg = "Received SIGUSR1 (reboot request)";
+                    if let Ok(mut log) = file_logger.lock() {
+                        log.log(LogLevel::Warn, msg);
+                    }
+                    if let Ok(mut con) = console_logger.lock() {
+                        con.message(LogLevel::Warn, msg, timer.elapsed());
+                    }
+
+                    // If you have a reboot flag instead, you'd use that here:
+                    shutdown_flag.store(true, Ordering::SeqCst);
+                    main_thread.unpark();
+                    break;
+                }
+
                 _ => {}
             }
         }
