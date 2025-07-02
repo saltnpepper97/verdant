@@ -16,16 +16,16 @@ mod utils;
 
 
 use std::{
-    env::args,
-    process::{Command, Stdio},
+    env::args, 
+    fs, 
+    path::Path, 
+    process::{Command, Stdio}, 
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
-    },
-    path::Path,
-    thread,
-    time::Duration,
-    fs,
+    }, 
+    thread, 
+    time::Duration
 };
 
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -131,7 +131,9 @@ fn inner_main() {
 
             remove_init_socket(&file_logger);
             let _ = actions::reboot();
-            break;
+            loop {
+                thread::park();
+            }
         }
 
         if shutdown_flag.load(Ordering::SeqCst) {
@@ -143,7 +145,9 @@ fn inner_main() {
   
             remove_init_socket(&file_logger);
             let _ = actions::shutdown();
-            break;
+            loop {
+                thread::park();
+            }
         }
 
         thread::park_timeout(Duration::from_millis(500));
