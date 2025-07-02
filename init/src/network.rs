@@ -12,9 +12,6 @@ use bloom::status::LogLevel;
 use bloom::time::ProcessTimer;
 
 /// Setup the loopback interface `lo`
-/// Equivalent to:
-///   ip link set dev lo up
-///   ip addr add 127.0.0.1/8 dev lo
 pub fn setup_loopback(
     console_logger: &mut dyn ConsoleLogger,
     file_logger: &mut dyn FileLogger,
@@ -25,7 +22,6 @@ pub fn setup_loopback(
         .map_err(|e| BloomError::Custom(format!("Failed to open socket: {}", e)))?;
     let raw_sock = sock.as_raw_fd();
 
-    // Only bring up if not already up
     if is_interface_up(raw_sock, "lo")? {
         let msg = "Loopback interface already up";
         console_logger.message(LogLevel::Info, msg, timer.elapsed());
@@ -45,37 +41,56 @@ pub fn setup_loopback(
     Ok(())
 }
 
-/// Bring up interface using ioctl SIOCSIFFLAGS
 fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError> {
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct Ifreq {
-        ifr_name: [c_char; libc::IFNAMSIZ],
-        ifr_flags: libc::c_short,
-        _pad: [u8; 24],
-    }
+    let mut ifr: libc::ifreq = unsafe { zeroed() };
 
-    let mut ifr: Ifreq = unsafe { zeroed() };
     for (dst, src) in ifr.ifr_name.iter_mut().zip(ifname.bytes()) {
         *dst = src as c_char;
     }
 
     unsafe {
         if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
-            return Err(BloomError::Custom(format!("ioctl SIOCGIFFLAGS failed for {}", ifname)));
+            return Err(BloomError::Custom(format!(
+                "ioctl SIOCGIFFLAGS failed for {}",
+                ifname
+            )));
         }
     }
 
-    const IFF_UP: libc::c_short = 0x1;
-    ifr.ifr_flags |= IFF_UP;
+    let current_flags = unsafe { ifr.ifr_ifru.ifru_flags };
+    let new_flags = current_flags | libc::IFF_UP as libc::c_short;
 
     unsafe {
+        ifr.ifr_ifru.ifru_flags = new_flags;
         if libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) < 0 {
-            return Err(BloomError::Custom(format!("ioctl SIOCSIFFLAGS failed for {}", ifname)));
+            return Err(BloomError::Custom(format!(
+                "ioctl SIOCSIFFLAGS failed for {}",
+                ifname
+            )));
         }
     }
 
     Ok(())
+}
+
+fn is_interface_up(sock: libc::c_int, ifname: &str) -> Result<bool, BloomError> {
+    let mut ifr: libc::ifreq = unsafe { zeroed() };
+
+    for (dst, src) in ifr.ifr_name.iter_mut().zip(ifname.bytes()) {
+        *dst = src as c_char;
+    }
+
+    unsafe {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
+            return Err(BloomError::Custom(format!(
+                "ioctl SIOCGIFFLAGS failed for {}",
+                ifname
+            )));
+        }
+
+        let flags = ifr.ifr_ifru.ifru_flags;
+        Ok(flags & (libc::IFF_UP as libc::c_short) != 0)
+    }
 }
 
 /// Assign 127.0.0.1/8 IP address to lo interface
@@ -104,38 +119,12 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
             &mut ifr.ifr_addr as *mut sockaddr as *mut u8,
             size_of::<sockaddr_in>(),
         );
-    }
 
-    unsafe {
         if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCSIFADDR failed for {}", ifname)));
         }
     }
 
     Ok(())
-}
-
-fn is_interface_up(sock: libc::c_int, ifname: &str) -> Result<bool, BloomError> {
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct Ifreq {
-        ifr_name: [c_char; libc::IFNAMSIZ],
-        ifr_flags: libc::c_short,
-        _pad: [u8; 24],
-    }
-
-    let mut ifr: Ifreq = unsafe { zeroed() };
-    for (dst, src) in ifr.ifr_name.iter_mut().zip(ifname.bytes()) {
-        *dst = src as c_char;
-    }
-
-    unsafe {
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
-            return Err(BloomError::Custom(format!("ioctl SIOCGIFFLAGS failed for {}", ifname)));
-        }
-    }
-
-    const IFF_UP: libc::c_short = 0x1;
-    Ok(ifr.ifr_flags & IFF_UP != 0)
 }
 
