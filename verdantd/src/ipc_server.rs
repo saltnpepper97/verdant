@@ -10,10 +10,12 @@ use crate::manager::ServiceManager;
 use bloom::ipc::{send_ipc_request, IpcRequest, IpcTarget, IpcCommand, IpcResponse, serialize_response, VERDANTD_SOCKET_PATH, INIT_SOCKET_PATH};
 use bloom::status::LogLevel;
 use serde_json;
+use std::sync::mpsc;
 
 pub fn run_ipc_server(
     service_manager: Arc<Mutex<ServiceManager>>,
     shutdown_flag: Arc<AtomicBool>,
+    ready_tx: Option<mpsc::Sender<()>>,
 ) -> std::io::Result<()> {
     use std::time::Duration;
 
@@ -44,6 +46,11 @@ pub fn run_ipc_server(
         if let Ok(mut file) = file_logger.lock() {
             file.log(LogLevel::Info, &msg);
         }
+    }
+
+    // Send ready signal if sender provided
+    if let Some(tx) = ready_tx {
+        let _ = tx.send(());
     }
 
     for stream_result in listener.incoming() {

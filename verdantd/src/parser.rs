@@ -203,7 +203,7 @@ pub fn parse_service_file(
     Ok(service)
 }
 
-fn log_success(
+fn _log_success(
     console_logger: &mut dyn ConsoleLogger,
     file_logger: &mut dyn FileLogger,
     timer: &ProcessTimer,

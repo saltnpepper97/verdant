@@ -8,7 +8,7 @@ mod service_file;
 mod supervisor;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Verdant Service Manager v{} - Cultivating System Harmony",
         version
     ));
-    file_logger_impl.initialize(&mut console_logger_impl);
+    let _ = file_logger_impl.initialize(&mut console_logger_impl);
 
     let console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>> =
         Arc::new(Mutex::new(console_logger_impl));
@@ -57,18 +57,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut mgr = manager.lock().unwrap();
         mgr.start_startup_services()?;
-        mgr.supervise_all(Arc::clone(&shutdown_flag))?; // <-- pass shutdown_flag here
+        mgr.supervise_all(Arc::clone(&shutdown_flag))?;
     }
+
 
     // Clone for IPC server
     let ipc_manager = Arc::clone(&manager);
     let ipc_shutdown_flag = Arc::clone(&shutdown_flag);
 
+
+    let (ipc_ready_tx, ipc_ready_rx) = mpsc::channel();
+
     thread::spawn(move || {
-        if let Err(e) = ipc_server::run_ipc_server(ipc_manager, ipc_shutdown_flag) {
+        if let Err(e) = ipc_server::run_ipc_server(ipc_manager, ipc_shutdown_flag, Some(ipc_ready_tx)) {
             eprintln!("IPC server error: {}", e);
         }
     });
+
+    // wait for ipc server to signal readiness before printing banner
+    ipc_ready_rx.recv().expect("Failed to receive IPC ready signal");
+
+    {
+        let banner = "\nBoot process complete. Breathe in. Log in.\n\n";
+        let mut con = console_logger.lock().unwrap();
+        con.banner(banner);
+    }
 
     // Main thread watches shutdown flag
     while !shutdown_flag.load(Ordering::SeqCst) {
