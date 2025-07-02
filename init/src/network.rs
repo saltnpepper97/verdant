@@ -2,6 +2,7 @@ use std::os::unix::io::AsRawFd;
 use std::mem::{zeroed, size_of};
 use std::time::Duration;
 use std::thread::sleep;
+use std::convert::TryInto;
 
 use nix::sys::socket::{socket, AddressFamily, SockType, SockFlag};
 use nix::libc::{sockaddr_in, AF_INET, sockaddr, in_addr, c_char};
@@ -49,7 +50,7 @@ fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError>
     }
 
     unsafe {
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS.try_into().unwrap(), &mut ifr) < 0 {
             return Err(BloomError::Custom(format!(
                 "ioctl SIOCGIFFLAGS failed for {}",
                 ifname
@@ -62,7 +63,7 @@ fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError>
 
     unsafe {
         ifr.ifr_ifru.ifru_flags = new_flags;
-        if libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFFLAGS.try_into().unwrap(), &ifr) < 0 {
             return Err(BloomError::Custom(format!(
                 "ioctl SIOCSIFFLAGS failed for {}",
                 ifname
@@ -81,7 +82,7 @@ fn is_interface_up(sock: libc::c_int, ifname: &str) -> Result<bool, BloomError> 
     }
 
     unsafe {
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS.try_into().unwrap(), &mut ifr) < 0 {
             return Err(BloomError::Custom(format!(
                 "ioctl SIOCGIFFLAGS failed for {}",
                 ifname
@@ -93,7 +94,6 @@ fn is_interface_up(sock: libc::c_int, ifname: &str) -> Result<bool, BloomError> 
     }
 }
 
-/// Assign 127.0.0.1/8 IP address to lo interface
 fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomError> {
     #[repr(C)]
     #[derive(Copy, Clone)]
@@ -120,8 +120,11 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
             size_of::<sockaddr_in>(),
         );
 
-        if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 {
-            return Err(BloomError::Custom(format!("ioctl SIOCSIFADDR failed for {}", ifname)));
+        if libc::ioctl(sock, libc::SIOCSIFADDR.try_into().unwrap(), &ifr) < 0 {
+            return Err(BloomError::Custom(format!(
+                "ioctl SIOCSIFADDR failed for {}",
+                ifname
+            )));
         }
     }
 
