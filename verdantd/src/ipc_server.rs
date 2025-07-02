@@ -24,21 +24,18 @@ pub fn run_ipc_server(
 
     let socket_path = Path::new(VERDANTD_SOCKET_PATH);
 
-    // ✅ Ensure parent directory exists
     if let Some(parent) = socket_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)?;
         }
     }
 
-    // ✅ Remove any stale socket file
     if socket_path.exists() {
         fs::remove_file(socket_path)?;
     }
 
     let listener = UnixListener::bind(socket_path)?;
 
-    // ✅ Log server start
     {
         let msg = format!("Verdantd IPC server listening on {}", VERDANTD_SOCKET_PATH);
         if let Ok(mut con) = console_logger.lock() {
@@ -86,7 +83,6 @@ pub fn run_ipc_server(
     Ok(())
 }
 
-
 fn handle_client(
     stream: &mut UnixStream,
     service_manager: Arc<Mutex<ServiceManager>>,
@@ -94,7 +90,6 @@ fn handle_client(
 ) -> std::io::Result<()> {
     use std::io::BufReader;
     use std::thread;
-    use std::time::Duration;
 
     let mut buf = Vec::new();
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -109,14 +104,14 @@ fn handle_client(
                 data: None,
             };
             let data = serialize_response(&resp);
-            let _ = stream.write_all(&data); // best effort
+            let _ = stream.write_all(&data);
             return Ok(());
         }
     };
 
     match request.command {
         IpcCommand::Shutdown | IpcCommand::Reboot => {
-            // ✅ Step 1: Acknowledge the vctl request first
+            // Step 1: Acknowledge request immediately
             let ack = IpcResponse {
                 success: true,
                 message: format!("{:?} initiated", request.command),
@@ -125,67 +120,63 @@ fn handle_client(
             let _ = stream.write_all(&serialize_response(&ack));
             let _ = stream.flush();
 
-            // ✅ Step 2: Spawn shutdown coordination in a new thread
+            // Step 2: Spawn thread to coordinate shutdown
             let sm = Arc::clone(&service_manager);
+            let shutdown_flag_clone = Arc::clone(&shutdown_flag);
             thread::spawn(move || {
-                let mut sm = match sm.lock() {
+                // Step 3: Set shutdown flag BEFORE shutting down services
+                shutdown_flag_clone.store(true, Ordering::SeqCst);
+
+                let mut sm_guard = match sm.lock() {
                     Ok(sm) => sm,
                     Err(_) => return,
                 };
 
-                // ✅ Step 3: Shutdown local services
-                if let Err(e) = sm.shutdown() {
+                // Step 4: Shutdown all services (supervisors observe shutdown flag and exit)
+                if let Err(e) = sm_guard.shutdown(Arc::clone(&shutdown_flag_clone)) {
                     let msg = format!("Failed to shutdown services: {}", e);
-                    if let Ok(mut con) = sm.get_console_logger().lock() {
-                        con.message(LogLevel::Fail, &msg, Duration::ZERO);
+                    if let Ok(mut con) = sm_guard.get_console_logger().lock() {
+                        con.message(LogLevel::Fail, &msg, std::time::Duration::ZERO);
                     }
-                    if let Ok(mut file) = sm.get_file_logger().lock() {
+                    if let Ok(mut file) = sm_guard.get_file_logger().lock() {
                         file.log(LogLevel::Fail, &msg);
                     }
                 }
 
-                // ✅ Step 4: Send command to init
+                // Step 5: Send shutdown/reboot command to init
                 let init_request = IpcRequest {
                     target: IpcTarget::Init,
                     command: request.command.clone(),
                 };
 
-                let success = match send_ipc_request(INIT_SOCKET_PATH, &init_request) {
+                match send_ipc_request(INIT_SOCKET_PATH, &init_request) {
                     Ok(response) if response.success => {
                         let msg = format!("Sent {:?} to init: {}", request.command, response.message);
-                        if let Ok(mut con) = sm.get_console_logger().lock() {
-                            con.message(LogLevel::Info, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm_guard.get_console_logger().lock() {
+                            con.message(LogLevel::Info, &msg, std::time::Duration::ZERO);
                         }
-                        if let Ok(mut file) = sm.get_file_logger().lock() {
+                        if let Ok(mut file) = sm_guard.get_file_logger().lock() {
                             file.log(LogLevel::Info, &msg);
                         }
-                        true
                     }
                     Ok(response) => {
                         let msg = format!("Init rejected {:?}: {}", request.command, response.message);
-                        if let Ok(mut con) = sm.get_console_logger().lock() {
-                            con.message(LogLevel::Warn, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm_guard.get_console_logger().lock() {
+                            con.message(LogLevel::Warn, &msg, std::time::Duration::ZERO);
                         }
-                        if let Ok(mut file) = sm.get_file_logger().lock() {
+                        if let Ok(mut file) = sm_guard.get_file_logger().lock() {
                             file.log(LogLevel::Warn, &msg);
                         }
-                        false
                     }
                     Err(e) => {
                         let msg = format!("Failed to send command to init: {}", e);
-                        if let Ok(mut con) = sm.get_console_logger().lock() {
-                            con.message(LogLevel::Warn, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm_guard.get_console_logger().lock() {
+                            con.message(LogLevel::Warn, &msg, std::time::Duration::ZERO);
                         }
-                        if let Ok(mut file) = sm.get_file_logger().lock() {
+                        if let Ok(mut file) = sm_guard.get_file_logger().lock() {
                             file.log(LogLevel::Warn, &msg);
                         }
-                        false
                     }
-                };
-
-                // ✅ Step 5: Only quit verdantd if init acknowledged
-                if success {
-                    shutdown_flag.store(true, Ordering::SeqCst);
                 }
             });
 

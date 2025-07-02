@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use bloom::errors::BloomError;
@@ -148,30 +148,40 @@ impl ServiceManager {
         Ok(())
     }
 
-    pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        let mut file = self.file_logger.lock().unwrap();
+    pub fn shutdown(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            file.log(LogLevel::Info, "Shutdown: Setting shutdown flag for all supervisors");
+        }
 
-        if self.supervisors.is_empty() {
-            let msg = "Shutdown: No services to stop";
-            file.log(LogLevel::Warn, msg);
-        } else {
-            for supervisor in self.supervisors.values_mut() {
-                let _ = supervisor.shutdown();
+        // Signal all supervisor loops to exit
+        shutdown_flag.store(true, Ordering::SeqCst);
+
+        // Stop all child services gracefully
+        for supervisor in self.supervisors.values_mut() {
+            let _ = supervisor.shutdown();
+        }
+
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            file.log(LogLevel::Info, "Shutdown: Joining all supervisor threads");
+        }
+
+        // Join supervisor threads to ensure clean exit
+        for (name, handle) in self.handles.drain() {
+            if let Err(e) = handle.join() {
+                eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
             }
         }
 
-        if self.handles.is_empty() {
-            let msg = "Shutdown: No supervisor threads to join";
-            file.log(LogLevel::Info, msg);
-        } else {
-            for (name, handle) in self.handles.drain() {
-                if let Err(e) = handle.join() {
-                    eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
-                }
-            }
-        }
-
+        // Clear all supervisors after shutdown complete
         self.supervisors.clear();
+
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            file.log(LogLevel::Info, "Shutdown: Completed");
+        }
+
         Ok(())
     }
 }

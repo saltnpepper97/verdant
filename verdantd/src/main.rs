@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let mut mgr = manager.lock().unwrap();
-        mgr.shutdown()?; // <- graceful cleanup
+        mgr.shutdown(Arc::clone(&shutdown_flag))?; // <- graceful cleanup
     }
 
     Ok(())

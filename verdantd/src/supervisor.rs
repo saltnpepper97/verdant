@@ -53,7 +53,7 @@ impl Supervisor {
 
         let launch_result = start_service(&self.service, &mut *file)?;
         self.child = Some(launch_result.child);
-        self.last_start = Some(launch_result.start_time); 
+        self.last_start = Some(launch_result.start_time);
 
         self.restart_count = 0;
         Ok(())
@@ -110,11 +110,43 @@ impl Supervisor {
                 {
                     let mut file = self.file_logger.lock().unwrap();
                     file.log(LogLevel::Info, &format!(
-                        "Shutdown flag detected. Stopping supervision for '{}'", self.service.name
+                        "Shutdown flag detected. Attempting graceful stop of '{}'", self.service.name
                     ));
-                } // file lock is dropped here
+                }
+
+                // Signal stop to service
                 let _ = self.shutdown();
-                break;
+
+                // Actively wait for child to exit to avoid premature exit of supervise loop
+                loop {
+                    match self.child.as_mut() {
+                        Some(child) => match child.try_wait() {
+                            Ok(Some(_status)) => {
+                                self.child = None;
+                                self.state = ServiceState::Stopped;
+                                let mut file = self.file_logger.lock().unwrap();
+                                file.log(LogLevel::Info, &format!(
+                                    "Service '{}' stopped cleanly on shutdown.", self.service.name
+                                ));
+                                break;
+                            }
+                            Ok(None) => {
+                                // Child still running, wait and retry
+                                thread::sleep(Duration::from_millis(100));
+                            }
+                            Err(e) => {
+                                let mut file = self.file_logger.lock().unwrap();
+                                file.log(LogLevel::Fail, &format!(
+                                    "Error waiting for service '{}': {}", self.service.name, e
+                                ));
+                                break;
+                            }
+                        },
+                        None => break,
+                    }
+                }
+
+                break; // exit supervise_loop after shutdown completes
             }
 
             let current_state = match self.child.as_mut() {
