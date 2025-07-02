@@ -52,13 +52,11 @@ impl Supervisor {
         self.state = ServiceState::Starting;
         let mut file = self.file_logger.lock().unwrap();
 
-        // Split self.service.cmd (a String) into command and args
-        // Assume command line string is whitespace separated
-        let mut parts = self.service.cmd.split_whitespace();
-        let cmd = parts.next().ok_or_else(|| {
-            BloomError::Custom(format!("Service '{}' has empty command", self.service.name))
-        })?;
-        let args: Vec<&str> = parts.collect();
+        let cmd = &self.service.cmd;
+        let args: Vec<&str> = match &self.service.args {
+            Some(vec) => vec.iter().map(|s| s.as_str()).collect(),
+            None => vec![],
+        };
 
         // Special handling for tty@ services: bind /dev/ttyX to stdin/stdout/stderr
         if self.service.name.starts_with("tty@") {
@@ -81,7 +79,7 @@ impl Supervisor {
             })?;
 
             let mut command = Command::new(cmd);
-            command.args(args);
+            command.args(&args);
             command.stdin(Stdio::from(tty));
             command.stdout(Stdio::from(tty_clone1));
             command.stderr(Stdio::from(tty_clone2));
