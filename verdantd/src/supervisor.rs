@@ -1,4 +1,4 @@
-use std::process::Child;
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -61,20 +61,6 @@ impl Supervisor {
 
     pub fn stop(&mut self) -> Result<(), BloomError> {
         if let Some(child) = &mut self.child {
-            // If this is a tty@ service and a user shell is logged in, skip stopping
-            if self.service.name.starts_with("tty@") {
-                if let Some(tty_id) = self.service.name.strip_prefix("tty@") {
-                    if is_tty_logged_in(tty_id) {
-                        let mut file = self.file_logger.lock().unwrap();
-                        file.log(LogLevel::Info, &format!(
-                            "Skipping stop of '{}' because tty '{}' has active login.",
-                            self.service.name, tty_id
-                        ));
-                        return Ok(()); // skip stop and return success
-                    }
-                }
-            }
-
             let mut con = self.console_logger.lock().unwrap();
             let mut file = self.file_logger.lock().unwrap();
 
@@ -105,11 +91,24 @@ impl Supervisor {
         result
     }
 
+    fn is_tty_logged_in(&self) -> bool {
+        if let Some(rest) = self.service.name.strip_prefix("tty@") {
+            let tty_name = format!("/dev/{}", rest);
+            if let Ok(output) = Command::new("who").output() {
+                if let Ok(text) = String::from_utf8(output.stdout) {
+                    return text.lines().any(|line| line.contains(&tty_name));
+                }
+            }
+        }
+        false
+    }
+
     pub fn supervise_loop(
         &mut self,
         shutdown_flag: Arc<AtomicBool>,
     ) -> Result<(), BloomError> {
         let mut last_state = self.state;
+        let mut tty_previously_logged_in = false;
 
         if self.child.is_none() {
             self.state = ServiceState::Starting;
@@ -120,6 +119,39 @@ impl Supervisor {
         }
 
         loop {
+            if self.service.name.starts_with("tty@") {
+                let logged_in = self.is_tty_logged_in();
+
+                if logged_in && !tty_previously_logged_in {
+                    {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(LogLevel::Info, &format!(
+                            "User detected on '{}'. Marking service as Stopped.",
+                            self.service.name
+                        ));
+                    }
+                    self.state = ServiceState::Stopped;
+                    self.child = None;
+                    tty_previously_logged_in = true;
+                }
+
+                if !logged_in && tty_previously_logged_in {
+                    tty_previously_logged_in = false;
+
+                    if self.service.restart == RestartPolicy::Always {
+                        {
+                            let mut file = self.file_logger.lock().unwrap();
+                            file.log(LogLevel::Info, &format!(
+                                "User logged out from '{}'. Restarting service.",
+                                self.service.name
+                            ));
+                        }
+                        self.start()?; // ← safe now
+                        self.state = ServiceState::Starting;
+                    }
+                }
+            }
+
             if shutdown_flag.load(Ordering::SeqCst) {
                 {
                     let mut file = self.file_logger.lock().unwrap();
@@ -128,10 +160,8 @@ impl Supervisor {
                     ));
                 }
 
-                // Signal stop to service
                 let _ = self.shutdown();
 
-                // Actively wait for child to exit with timeout, forcibly kill if needed
                 let timeout = Duration::from_secs(5);
                 let start = Instant::now();
 
@@ -141,37 +171,40 @@ impl Supervisor {
                             Ok(Some(_status)) => {
                                 self.child = None;
                                 self.state = ServiceState::Stopped;
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(LogLevel::Info, &format!(
-                                    "Service '{}' stopped cleanly on shutdown.", self.service.name
-                                ));
+                                {
+                                    let mut file = self.file_logger.lock().unwrap();
+                                    file.log(LogLevel::Info, &format!(
+                                        "Service '{}' stopped cleanly on shutdown.", self.service.name
+                                    ));
+                                }
                                 break;
                             }
                             Ok(None) => {
                                 if start.elapsed() > timeout {
-                                    let mut file = self.file_logger.lock().unwrap();
-                                    file.log(LogLevel::Warn, &format!(
-                                        "Timeout waiting for service '{}' to stop; sending SIGKILL", self.service.name
-                                    ));
-
+                                    {
+                                        let mut file = self.file_logger.lock().unwrap();
+                                        file.log(LogLevel::Warn, &format!(
+                                            "Timeout waiting for service '{}' to stop; sending SIGKILL", self.service.name
+                                        ));
+                                    }
                                     #[cfg(unix)]
                                     {
                                         use nix::sys::signal::{kill, Signal};
                                         use nix::unistd::Pid;
-
                                         let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                                     }
-
                                     thread::sleep(Duration::from_millis(200));
                                 } else {
                                     thread::sleep(Duration::from_millis(100));
                                 }
                             }
                             Err(e) => {
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(LogLevel::Fail, &format!(
-                                    "Error waiting for service '{}': {}", self.service.name, e
-                                ));
+                                {
+                                    let mut file = self.file_logger.lock().unwrap();
+                                    file.log(LogLevel::Fail, &format!(
+                                        "Error waiting for service '{}': {}", self.service.name, e
+                                    ));
+                                }
                                 break;
                             }
                         },
@@ -179,7 +212,7 @@ impl Supervisor {
                     }
                 }
 
-                break; // exit supervise_loop after shutdown completes
+                break;
             }
 
             let current_state = match self.child.as_mut() {
@@ -187,11 +220,9 @@ impl Supervisor {
                     Ok(Some(status)) => {
                         {
                             let mut file = self.file_logger.lock().unwrap();
-                            let msg = format!(
-                                "Service '{}' exited with status {}",
-                                self.service.name, status
-                            );
-                            file.log(LogLevel::Warn, &msg);
+                            file.log(LogLevel::Warn, &format!(
+                                "Service '{}' exited with status {}", self.service.name, status
+                            ));
                         }
 
                         self.child = None;
@@ -199,22 +230,6 @@ impl Supervisor {
                         match self.service.restart {
                             RestartPolicy::Always => {
                                 self.restart_count += 1;
-
-                                if self.service.name.starts_with("tty@") {
-                                    if let Some(tty_id) = self.service.name.strip_prefix("tty@") {
-                                        if is_tty_logged_in(tty_id) {
-                                            let mut file = self.file_logger.lock().unwrap();
-                                            file.log(LogLevel::Info, &format!(
-                                                "TTY '{}' has active login session, skipping getty restart.",
-                                                tty_id
-                                            ));
-                                            self.state = ServiceState::Running;
-                                            thread::sleep(Duration::from_secs(2));
-                                            continue;
-                                        }
-                                    }
-                                }
-
                                 if let Some(delay) = self.service.restart_delay {
                                     if delay > 0 {
                                         thread::sleep(Duration::from_secs(delay));
@@ -270,8 +285,7 @@ impl Supervisor {
                     Err(e) => {
                         self.state = ServiceState::Failed;
                         return Err(BloomError::Custom(format!(
-                            "Failed to wait for service {}: {}",
-                            self.service.name, e
+                            "Failed to wait for service {}: {}", self.service.name, e
                         )));
                     }
                 },
@@ -279,12 +293,13 @@ impl Supervisor {
             };
 
             if current_state != last_state {
-                let mut file = self.file_logger.lock().unwrap();
-                let msg = format!(
-                    "Service '{}' state changed: {:?} → {:?}",
-                    self.service.name, last_state, current_state
-                );
-                file.log(LogLevel::Info, &msg);
+                {
+                    let mut file = self.file_logger.lock().unwrap();
+                    file.log(LogLevel::Info, &format!(
+                        "Service '{}' state changed: {:?} → {:?}",
+                        self.service.name, last_state, current_state
+                    ));
+                }
                 last_state = current_state;
             }
 
@@ -294,33 +309,5 @@ impl Supervisor {
 
         Ok(())
     }
-}
-
-/// Returns true if a user shell (non-getty) is currently running on this tty
-pub fn is_tty_logged_in(tty: &str) -> bool {
-    use std::fs;
-
-    let target = format!("/dev/tty{}", tty.trim_start_matches("tty"));
-
-    if let Ok(entries) = fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            let pid_path = entry.path();
-            let fd0 = pid_path.join("fd/0");
-
-            if let Ok(link) = fs::read_link(&fd0) {
-                if let Some(path) = link.to_str() {
-                    if path == target {
-                        if let Ok(comm) = fs::read_to_string(pid_path.join("comm")) {
-                            let name = comm.trim();
-                            if name != "getty" {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
 }
 
