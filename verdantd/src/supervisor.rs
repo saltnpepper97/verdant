@@ -93,11 +93,9 @@ impl Supervisor {
 
     fn is_tty_logged_in(&self) -> bool {
         if let Some(rest) = self.service.name.strip_prefix("tty@") {
-            let tty_name = format!("/dev/{}", rest);
-            if let Ok(output) = Command::new("who").output() {
-                if let Ok(text) = String::from_utf8(output.stdout) {
-                    return text.lines().any(|line| line.contains(&tty_name));
-                }
+            let tty_path = format!("/dev/{}", rest);
+            if let Ok(output) = Command::new("fuser").arg(&tty_path).output() {
+                return output.status.success();
             }
         }
         false
