@@ -99,7 +99,7 @@ impl Supervisor {
         let mut last_state = self.state;
 
         // On first boot, only start tty@ service if TTY is not already in use
-        if self.child.is_none() && !self.should_block_tty_start() {
+        if self.child.is_none() {
             if let Err(e) = self.start() {
                 self.state = ServiceState::Failed;
                 return Err(e);
