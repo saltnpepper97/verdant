@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::fs;
+use std::{fs, io};
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -49,11 +49,12 @@ impl Supervisor {
         }
 
         self.state = ServiceState::Starting;
-        let mut file = self.file_logger.lock().unwrap();
-        let launch_result = start_service(&self.service, &mut *file)?;
-
-        self.child = Some(launch_result.child);
-        self.last_start = Some(launch_result.start_time);
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            let launch_result = start_service(&self.service, &mut *file)?;
+            self.child = Some(launch_result.child);
+            self.last_start = Some(launch_result.start_time);
+        }
         self.restart_count = 0;
         Ok(())
     }
@@ -64,6 +65,23 @@ impl Supervisor {
             let mut file = self.file_logger.lock().unwrap();
 
             self.state = ServiceState::Stopping;
+
+            if self.service.name.starts_with("tty@") {
+                if let Some(tty_id) = self.service.name.strip_prefix("tty@") {
+                    if let Err(e) = kill_processes_on_tty(tty_id) {
+                        file.log(LogLevel::Warn, &format!(
+                            "Failed to kill processes on tty '{}': {}",
+                            tty_id, e
+                        ));
+                    } else {
+                        file.log(LogLevel::Info, &format!(
+                            "Killed all processes on tty '{}' before stopping service.",
+                            tty_id
+                        ));
+                    }
+                }
+            }
+
             stop_service(&self.service, child.id(), &mut *con, &mut *file)?;
             self.child = None;
             self.state = ServiceState::Stopped;
@@ -78,14 +96,16 @@ impl Supervisor {
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
         let result = self.stop();
-        let mut file = self.file_logger.lock().unwrap();
 
-        let msg = if result.is_ok() {
-            format!("Supervisor shutdown: '{}'", self.service.name)
-        } else {
-            format!("Supervisor shutdown failed: '{}'", self.service.name)
-        };
-        file.log(LogLevel::Info, &msg);
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            let msg = if result.is_ok() {
+                format!("Supervisor shutdown: '{}'", self.service.name)
+            } else {
+                format!("Supervisor shutdown failed: '{}'", self.service.name)
+            };
+            file.log(LogLevel::Info, &msg);
+        }
 
         result
     }
@@ -115,6 +135,8 @@ impl Supervisor {
                 }
 
                 let _ = self.shutdown();
+
+                // Wait for child exit with timeout + SIGKILL fallback
                 let timeout = Duration::from_secs(5);
                 let start = Instant::now();
 
@@ -124,37 +146,45 @@ impl Supervisor {
                             Ok(Some(_)) => {
                                 self.child = None;
                                 self.state = ServiceState::Stopped;
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(LogLevel::Info, &format!(
-                                    "Service '{}' stopped cleanly on shutdown.",
-                                    self.service.name
-                                ));
+                                {
+                                    let mut file = self.file_logger.lock().unwrap();
+                                    file.log(LogLevel::Info, &format!(
+                                        "Service '{}' stopped cleanly on shutdown.",
+                                        self.service.name
+                                    ));
+                                }
                                 break;
                             }
                             Ok(None) => {
                                 if start.elapsed() > timeout {
-                                    let mut file = self.file_logger.lock().unwrap();
-                                    file.log(LogLevel::Warn, &format!(
-                                        "Timeout waiting for service '{}' to stop; sending SIGKILL",
-                                        self.service.name
-                                    ));
+                                    {
+                                        let mut file = self.file_logger.lock().unwrap();
+                                        file.log(LogLevel::Warn, &format!(
+                                            "Timeout waiting for service '{}' to stop; sending SIGKILL",
+                                            self.service.name
+                                        ));
+                                    }
+
                                     #[cfg(unix)]
                                     {
                                         use nix::sys::signal::{kill, Signal};
                                         use nix::unistd::Pid;
                                         let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                                     }
+
                                     thread::sleep(Duration::from_millis(200));
                                 } else {
                                     thread::sleep(Duration::from_millis(100));
                                 }
                             }
                             Err(e) => {
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(LogLevel::Fail, &format!(
-                                    "Error waiting for service '{}': {}",
-                                    self.service.name, e
-                                ));
+                                {
+                                    let mut file = self.file_logger.lock().unwrap();
+                                    file.log(LogLevel::Fail, &format!(
+                                        "Error waiting for service '{}': {}",
+                                        self.service.name, e
+                                    ));
+                                }
                                 break;
                             }
                         },
@@ -181,23 +211,25 @@ impl Supervisor {
                         match self.service.restart {
                             RestartPolicy::Always => {
                                 self.restart_count += 1;
-                                if let Some(delay) = self.service.restart_delay {
-                                    if delay > 0 {
-                                        thread::sleep(Duration::from_secs(delay));
-                                    }
-                                }
 
                                 if self.service.name.starts_with("tty@") {
                                     if let Some(tty_id) = self.service.name.strip_prefix("tty@") {
                                         if is_tty_logged_in(tty_id) {
                                             let mut file = self.file_logger.lock().unwrap();
                                             file.log(LogLevel::Info, &format!(
-                                                "TTY '{}' has an active login session, not restarting getty.",
+                                                "TTY '{}' has active login session, skipping getty restart.",
                                                 tty_id
                                             ));
                                             self.state = ServiceState::Running;
+                                            thread::sleep(Duration::from_secs(2));
                                             continue;
                                         }
+                                    }
+                                }
+
+                                if let Some(delay) = self.service.restart_delay {
+                                    if delay > 0 {
+                                        thread::sleep(Duration::from_secs(delay));
                                     }
                                 }
 
@@ -275,7 +307,7 @@ impl Supervisor {
     }
 }
 
-/// Returns true if a user shell is currently running on this tty
+/// Returns true if a user shell (non-getty) is currently running on this tty
 pub fn is_tty_logged_in(tty: &str) -> bool {
     let target = format!("/dev/tty{}", tty.trim_start_matches("tty"));
 
@@ -298,7 +330,46 @@ pub fn is_tty_logged_in(tty: &str) -> bool {
             }
         }
     }
-
     false
+}
+
+/// Kill all processes that have fd0 on this tty
+fn kill_processes_on_tty(tty: &str) -> io::Result<()> {
+    let target = format!("/dev/tty{}", tty.trim_start_matches("tty"));
+
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let pid_path = entry.path();
+
+        if !pid_path.is_dir() || pid_path.file_name().is_none() {
+            continue;
+        }
+
+        let fd0 = pid_path.join("fd/0");
+
+        if let Ok(link) = fs::read_link(&fd0) {
+            if let Some(path) = link.to_str() {
+                if path == target {
+                    if let Some(pid_str) = pid_path.file_name().and_then(|n| n.to_str()) {
+                        if let Ok(pid) = pid_str.parse::<i32>() {
+                            if let Ok(comm) = fs::read_to_string(pid_path.join("comm")) {
+                                let comm_name = comm.trim();
+                                if comm_name != "getty" {
+                                    #[cfg(unix)]
+                                    {
+                                        use nix::sys::signal::{kill, Signal};
+                                        use nix::unistd::Pid;
+                                        let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    thread::sleep(Duration::from_secs(1));
+    Ok(())
 }
 
