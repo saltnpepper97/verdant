@@ -35,14 +35,30 @@ pub fn load_services(
         let path = entry.path();
 
         if path.is_file() && path.extension().map(|s| s == "vs").unwrap_or(false) {
+            // Parse base service file once with empty vars to get instances list
             match parse_service_file(&path, &HashMap::new(), console_logger, file_logger) {
                 Ok(service) => {
                     if let Some(instances) = &service.instances {
                         for id in instances {
-                            let mut inst = service.clone();
-                            inst.name = format!("{}@{}", inst.name, id);
-                            services.push(inst);
-                            parsed_count += 1;
+                            let mut vars = HashMap::new();
+                            vars.insert("id".to_string(), id.clone());
+
+                            // Parse the service file again for each instance with vars applied
+                            match parse_service_file(&path, &vars, console_logger, file_logger) {
+                                Ok(mut inst) => {
+                                    inst.name = format!("{}@{}", inst.name, id);
+                                    services.push(inst);
+                                    parsed_count += 1;
+                                }
+                                Err(e) => {
+                                    let msg = format!(
+                                        "Failed to parse service file {:?} with instance '{}': {:?}",
+                                        path, id, e
+                                    );
+                                    console_logger.message(LogLevel::Fail, &msg, std::time::Duration::ZERO);
+                                    file_logger.log(LogLevel::Fail, &msg);
+                                }
+                            }
                         }
                     } else {
                         services.push(service);
