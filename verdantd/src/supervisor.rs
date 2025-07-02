@@ -143,13 +143,27 @@ impl Supervisor {
 
                         self.child = None;
 
-                        // Exit immediately if shutdown in progress
                         if shutdown_flag.load(Ordering::SeqCst) {
                             break;
                         }
 
                         match self.service.restart {
                             RestartPolicy::Always => {
+                                if is_tty_logged_in(&self.service.name) {
+                                    self.state = ServiceState::Stopped;
+                                    {
+                                        let mut file = self.file_logger.lock().unwrap();
+                                        file.log(
+                                            LogLevel::Info,
+                                            &format!(
+                                                "Service '{}' not restarted because user is still logged in.",
+                                                self.service.name
+                                            ),
+                                        );
+                                    }
+                                    return Ok(()); // Do not restart while session active
+                                }
+
                                 self.restart_count += 1;
                                 if let Some(delay) = self.service.restart_delay {
                                     thread::sleep(Duration::from_secs(delay));
@@ -201,16 +215,14 @@ impl Supervisor {
             };
 
             if current_state != last_state {
-                {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(
-                        LogLevel::Info,
-                        &format!(
-                            "Service '{}' state changed: {:?} → {:?}",
-                            self.service.name, last_state, current_state
-                        ),
-                    );
-                }
+                let mut file = self.file_logger.lock().unwrap();
+                file.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Service '{}' state changed: {:?} → {:?}",
+                        self.service.name, last_state, current_state
+                    ),
+                );
                 last_state = current_state;
             }
 
@@ -266,16 +278,14 @@ impl Supervisor {
                         }
                     }
                     Err(e) => {
-                        {
-                            let mut file = self.file_logger.lock().unwrap();
-                            file.log(
-                                LogLevel::Fail,
-                                &format!(
-                                    "Error waiting for service '{}': {}",
-                                    self.service.name, e
-                                ),
-                            );
-                        }
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(
+                            LogLevel::Fail,
+                            &format!(
+                                "Error waiting for service '{}': {}",
+                                self.service.name, e
+                            ),
+                        );
                         break;
                     }
                 },
@@ -283,5 +293,21 @@ impl Supervisor {
             }
         }
     }
+}
+
+/// Check if a tty@ service name (e.g., tty@tty1) is logged in
+fn is_tty_logged_in(service_name: &str) -> bool {
+    if let Some(tty_name) = service_name.strip_prefix("tty@") {
+        let path = format!("/dev/{}", tty_name);
+        let output = std::process::Command::new("fuser")
+            .arg(&path)
+            .output();
+
+        if let Ok(output) = output {
+            // If fuser returns a non-empty output, the TTY is in use
+            return !output.stdout.is_empty();
+        }
+    }
+    false
 }
 
