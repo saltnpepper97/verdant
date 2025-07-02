@@ -39,14 +39,16 @@ pub fn load_services(
             match parse_service_file(&path, &HashMap::new(), console_logger, file_logger) {
                 Ok(service) => {
                     if let Some(instances) = &service.instances {
-                        for id in instances {
+                        for id_raw in instances {
+                            let id = id_raw.trim();
+
                             let mut vars = HashMap::new();
-                            vars.insert("id".to_string(), id.clone());
+                            vars.insert("id".to_string(), id.to_string());
 
                             // Parse the service file again for each instance with vars applied
                             match parse_service_file(&path, &vars, console_logger, file_logger) {
-                                Ok(mut inst) => {
-                                    inst.name = format!("{}@{}", inst.name, id);
+                                Ok(inst) => {
+                                    // The name is already substituted, so just push as is
                                     services.push(inst);
                                     parsed_count += 1;
                                 }
