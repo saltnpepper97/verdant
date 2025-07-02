@@ -1,5 +1,6 @@
 use std::process::Child;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,7 +40,6 @@ impl Supervisor {
         }
     }
 
-    /// Start the service; if `silent` is true, suppress console logging.
     pub fn start(&mut self) -> Result<(), BloomError> {
         if self.child.is_some() {
             return Err(BloomError::Custom(format!(
@@ -91,7 +91,10 @@ impl Supervisor {
         result
     }
 
-    pub fn supervise_loop(&mut self) -> Result<(), BloomError> {
+    pub fn supervise_loop(
+        &mut self,
+        shutdown_flag: Arc<AtomicBool>,
+    ) -> Result<(), BloomError> {
         let mut last_state = self.state;
 
         if self.child.is_none() {
@@ -103,6 +106,17 @@ impl Supervisor {
         }
 
         loop {
+            if shutdown_flag.load(Ordering::SeqCst) {
+                {
+                    let mut file = self.file_logger.lock().unwrap();
+                    file.log(LogLevel::Info, &format!(
+                        "Shutdown flag detected. Stopping supervision for '{}'", self.service.name
+                    ));
+                } // file lock is dropped here
+                let _ = self.shutdown();
+                break;
+            }
+
             let current_state = match self.child.as_mut() {
                 Some(child) => match child.try_wait() {
                     Ok(Some(status)) => {
@@ -125,6 +139,12 @@ impl Supervisor {
                                         thread::sleep(Duration::from_secs(delay));
                                     }
                                 }
+
+                                if shutdown_flag.load(Ordering::SeqCst) {
+                                    let _ = self.shutdown();
+                                    break;
+                                }
+
                                 self.state = ServiceState::Starting;
                                 if let Err(e) = self.start() {
                                     self.state = ServiceState::Failed;
@@ -140,6 +160,12 @@ impl Supervisor {
                                             thread::sleep(Duration::from_secs(delay));
                                         }
                                     }
+
+                                    if shutdown_flag.load(Ordering::SeqCst) {
+                                        let _ = self.shutdown();
+                                        break;
+                                    }
+
                                     self.state = ServiceState::Starting;
                                     if let Err(e) = self.start() {
                                         self.state = ServiceState::Failed;

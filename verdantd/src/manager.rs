@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use std::thread::{self, JoinHandle};
 
 use bloom::errors::BloomError;
@@ -54,64 +55,56 @@ impl ServiceManager {
         Ok(())
     }
 
-pub fn start_startup_services(&mut self) -> Result<(), BloomError> {
-    let mut started_count = 0;
-    let mut to_spawn = Vec::new();
-    let mut startup_packages = HashSet::new();
+    pub fn start_startup_services(&mut self) -> Result<(), BloomError> {
+        let mut started_count = 0;
+        let mut to_spawn = Vec::new();
+        let mut startup_packages = HashSet::new();
 
-    // First start services and collect info WITHOUT holding logger locks during start
-    for (name, supervisor) in self.supervisors.iter_mut() {
-        if let Some(package_name) = supervisor.service.startup_package.clone() {
-            supervisor.start()?; // no silent flag, just start()
-            to_spawn.push(name.clone());
-            startup_packages.insert(package_name);
-            started_count += 1;
-        }
-    }
-
-    // Spawn threads after starting
-    for name in &to_spawn {
-        self.spawn_supervisor_thread(name.clone())?;
-    }
-
-    // Now log per-service and summary WITH logger locks only for the log calls
-    {
-        let mut con = self.console_logger.lock().unwrap();
-        let mut file = self.file_logger.lock().unwrap();
-
-        if started_count > 0 {
-            for name in &to_spawn {
-                if let Some(pkg) = self.supervisors.get(name).and_then(|s| s.service.startup_package.clone()) {
-                    let per_service_msg = format!("Started service '{}' with startup package '{}'", name, pkg);
-                    con.message(LogLevel::Info, &per_service_msg, std::time::Duration::ZERO);
-                    file.log(LogLevel::Info, &per_service_msg);
-                }
+        for (name, supervisor) in self.supervisors.iter_mut() {
+            if let Some(package_name) = supervisor.service.startup_package.clone() {
+                supervisor.start()?;
+                to_spawn.push(name.clone());
+                startup_packages.insert(package_name);
+                started_count += 1;
             }
-
-            let mut packages_list: Vec<_> = startup_packages.into_iter().collect();
-            packages_list.sort();
-            let summary_msg = format!(
-                "Started {} service(s) marked with startup_package(s): {}",
-                started_count,
-                packages_list.join(", ")
-            );
-            file.log(LogLevel::Info, &summary_msg);
-        } else {
-            let msg = "No startup packages found";
-            con.message(LogLevel::Warn, msg, std::time::Duration::ZERO);
-            file.log(LogLevel::Warn, msg);
         }
+
+        {
+            let mut con = self.console_logger.lock().unwrap();
+            let mut file = self.file_logger.lock().unwrap();
+
+            if started_count > 0 {
+                for name in &to_spawn {
+                    if let Some(pkg) = self.supervisors.get(name).and_then(|s| s.service.startup_package.clone()) {
+                        let per_service_msg = format!("Started service '{}' with startup package '{}'", name, pkg);
+                        con.message(LogLevel::Info, &per_service_msg, std::time::Duration::ZERO);
+                        file.log(LogLevel::Info, &per_service_msg);
+                    }
+                }
+
+                let mut packages_list: Vec<_> = startup_packages.into_iter().collect();
+                packages_list.sort();
+                let summary_msg = format!(
+                    "Started {} service(s) marked with startup_package(s): {}",
+                    started_count,
+                    packages_list.join(", ")
+                );
+                file.log(LogLevel::Info, &summary_msg);
+            } else {
+                let msg = "No startup packages found";
+                con.message(LogLevel::Warn, msg, std::time::Duration::ZERO);
+                file.log(LogLevel::Warn, msg);
+            }
+        }
+
+        Ok(())
     }
-
-    Ok(())
-}
-
 
     pub fn start_service(&mut self, name: &str) -> Result<(), BloomError> {
         let supervisor = self.supervisors.get_mut(name)
             .ok_or_else(|| BloomError::Custom(format!("Service '{}' not found", name)))?;
-        supervisor.start()?; // interactive/manual start = not silent
-        self.spawn_supervisor_thread(name.to_string())
+        supervisor.start()?;
+        Ok(())
     }
 
     pub fn stop_service(&mut self, name: &str) -> Result<(), BloomError> {
@@ -120,7 +113,11 @@ pub fn start_startup_services(&mut self) -> Result<(), BloomError> {
         supervisor.stop()
     }
 
-    pub fn spawn_supervisor_thread(&mut self, name: String) -> Result<(), BloomError> {
+    pub fn spawn_supervisor_thread(
+        &mut self,
+        name: String,
+        shutdown_flag: Arc<AtomicBool>,
+    ) -> Result<(), BloomError> {
         if self.handles.contains_key(&name) {
             return Ok(());
         }
@@ -135,7 +132,7 @@ pub fn start_startup_services(&mut self) -> Result<(), BloomError> {
         ));
 
         let handle = thread::spawn(move || {
-            if let Err(e) = supervisor.supervise_loop() {
+            if let Err(e) = supervisor.supervise_loop(shutdown_flag) {
                 eprintln!("Supervisor for service '{}' exited with error: {:?}", supervisor.service.name, e);
             }
         });
@@ -144,9 +141,9 @@ pub fn start_startup_services(&mut self) -> Result<(), BloomError> {
         Ok(())
     }
 
-    pub fn supervise_all(&mut self) -> Result<(), BloomError> {
+    pub fn supervise_all(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
         for name in self.supervisors.keys().cloned().collect::<Vec<_>>() {
-            self.spawn_supervisor_thread(name)?;
+            self.spawn_supervisor_thread(name, Arc::clone(&shutdown_flag))?;
         }
         Ok(())
     }

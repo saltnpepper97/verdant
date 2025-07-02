@@ -45,7 +45,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut con = console_logger.lock().unwrap();
         let mut file = file_logger.lock().unwrap();
 
-        
         let vars = HashMap::new();
         let services = load_services(&vars, &mut *con, &mut *file)?;
 
@@ -58,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut mgr = manager.lock().unwrap();
         mgr.start_startup_services()?;
-        mgr.supervise_all()?;
+        mgr.supervise_all(Arc::clone(&shutdown_flag))?; // <-- pass shutdown_flag here
     }
 
     // Clone for IPC server
@@ -81,6 +80,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut file = file_logger.lock().unwrap();
         file.log(LogLevel::Info, "verdantd exiting cleanly.");
     }
+
+    {
+        let mut mgr = manager.lock().unwrap();
+        mgr.shutdown()?; // <- graceful cleanup
+    }
+
     Ok(())
 }
 
