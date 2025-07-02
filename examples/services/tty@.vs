@@ -2,7 +2,7 @@ name: tty@{id}
 desc: Login prompt using getty on /dev/{id}
 
 cmd: /sbin/getty
-args: -L /dev/{id} 115200 linux
+args: -L 115200 /dev/{id} linux
 
 restart: always
 
