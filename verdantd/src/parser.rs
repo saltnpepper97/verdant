@@ -77,6 +77,13 @@ pub fn parse_service_file(
                             service.tags = Some(vec![val.to_string()]);
                         }
                     }
+                    "instances" => {
+                        if let Some(ref mut inst_vec) = service.instances {
+                            inst_vec.push(val.to_string());
+                        } else {
+                            service.instances = Some(vec![val.to_string()]);
+                        }
+                    }
                     _ => {
                         // Unknown list key with indentation, ignore or log if you want
                     }

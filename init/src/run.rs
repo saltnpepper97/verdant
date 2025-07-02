@@ -23,7 +23,7 @@ pub fn boot() -> (
     let console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>> =
         Arc::new(Mutex::new(ConsoleLoggerImpl::new(LogLevel::Info)));
     let file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>> =
-        Arc::new(Mutex::new(FileLoggerImpl::new(LogLevel::Info, "/var/log/verdant.log")));
+        Arc::new(Mutex::new(FileLoggerImpl::new(LogLevel::Info, "/var/log/verdant/init.log")));
 
     let start_time = SystemTimer::new();
 

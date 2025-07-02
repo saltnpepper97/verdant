@@ -20,7 +20,7 @@ use crate::loader::load_services;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut console_logger_impl = ConsoleLoggerImpl::new(LogLevel::Info);
-    let mut file_logger_impl = FileLoggerImpl::new(LogLevel::Info, "/var/log/verdantd.log");
+    let mut file_logger_impl = FileLoggerImpl::new(LogLevel::Info, "/var/log/verdant/verdantd.log");
 
     let version = env!("CARGO_PKG_VERSION");
     console_logger_impl.banner(&format!(

@@ -49,6 +49,8 @@ pub struct ServiceFile {
     pub nice: Option<i32>,
 
     pub tags: Option<Vec<String>>,
+
+    pub instances: Option<Vec<String>>,
 }
 
 impl ServiceFile {
@@ -78,6 +80,7 @@ impl ServiceFile {
             umask: None,
             nice: None,
             tags: None,
+            instances: None
         }
     }
 }
