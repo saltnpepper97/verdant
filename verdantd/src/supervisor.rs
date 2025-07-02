@@ -115,7 +115,10 @@ impl Supervisor {
                     let mut file = self.file_logger.lock().unwrap();
                     file.log(
                         LogLevel::Info,
-                        &format!("Shutdown flag detected. Attempting graceful stop of '{}'", self.service.name),
+                        &format!(
+                            "Shutdown flag detected. Attempting graceful stop of '{}'",
+                            self.service.name
+                        ),
                     );
                 }
 
@@ -131,22 +134,25 @@ impl Supervisor {
                             let mut file = self.file_logger.lock().unwrap();
                             file.log(
                                 LogLevel::Warn,
-                                &format!("Service '{}' exited with status {}", self.service.name, status),
+                                &format!(
+                                    "Service '{}' exited with status {}",
+                                    self.service.name, status
+                                ),
                             );
                         }
 
                         self.child = None;
+
+                        // Exit immediately if shutdown in progress
+                        if shutdown_flag.load(Ordering::SeqCst) {
+                            break;
+                        }
 
                         match self.service.restart {
                             RestartPolicy::Always => {
                                 self.restart_count += 1;
                                 if let Some(delay) = self.service.restart_delay {
                                     thread::sleep(Duration::from_secs(delay));
-                                }
-
-                                if shutdown_flag.load(Ordering::SeqCst) {
-                                    let _ = self.shutdown();
-                                    return Ok(());
                                 }
 
                                 self.state = ServiceState::Starting;
@@ -163,11 +169,6 @@ impl Supervisor {
                                         thread::sleep(Duration::from_secs(delay));
                                     }
 
-                                    if shutdown_flag.load(Ordering::SeqCst) {
-                                        let _ = self.shutdown();
-                                        return Ok(());
-                                    }
-
                                     self.state = ServiceState::Starting;
                                     if let Err(e) = self.start() {
                                         self.state = ServiceState::Failed;
@@ -175,10 +176,10 @@ impl Supervisor {
                                     }
                                     ServiceState::Starting
                                 } else {
-                                    break;
+                                    ServiceState::Stopped
                                 }
                             }
-                            RestartPolicy::Never => break,
+                            RestartPolicy::Never => ServiceState::Stopped,
                         }
                     }
                     Ok(None) => {
@@ -191,7 +192,8 @@ impl Supervisor {
                     Err(e) => {
                         self.state = ServiceState::Failed;
                         return Err(BloomError::Custom(format!(
-                            "Failed to wait for service {}: {}", self.service.name, e
+                            "Failed to wait for service {}: {}",
+                            self.service.name, e
                         )));
                     }
                 },
@@ -231,7 +233,10 @@ impl Supervisor {
                             let mut file = self.file_logger.lock().unwrap();
                             file.log(
                                 LogLevel::Info,
-                                &format!("Service '{}' stopped cleanly on shutdown.", self.service.name),
+                                &format!(
+                                    "Service '{}' stopped cleanly on shutdown.",
+                                    self.service.name
+                                ),
                             );
                         }
                         break;
