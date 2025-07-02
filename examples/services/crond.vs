@@ -1,7 +1,7 @@
 name: crond
 
 cmd: /usr/sbin/crond
-args: -f
+args: -f -d 8
 
 startup-package: base
 
