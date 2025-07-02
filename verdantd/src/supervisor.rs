@@ -1,8 +1,9 @@
-use std::process::{Child, Command};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::fs;
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -98,7 +99,7 @@ impl Supervisor {
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
         let mut last_state = self.state;
 
-        // On first boot, only start tty@ service if TTY is not already in use
+        // Start on boot
         if self.child.is_none() {
             if let Err(e) = self.start() {
                 self.state = ServiceState::Failed;
@@ -120,7 +121,7 @@ impl Supervisor {
             if let Some(tty_id) = self.is_tty_instance() {
                 let in_use = self.is_tty_logged_in(&tty_id);
 
-                // Stop if someone logs in
+                // Stop if logged in
                 if in_use && self.state != ServiceState::Stopped {
                     {
                         let mut file = self.file_logger.lock().unwrap();
@@ -141,7 +142,6 @@ impl Supervisor {
                     }
                 }
             } else {
-                // Normal (non-tty@) service logic
                 let current_state = match self.child.as_mut() {
                     Some(child) => match child.try_wait() {
                         Ok(Some(status)) => {
@@ -250,20 +250,37 @@ impl Supervisor {
         self.service.name.strip_prefix("tty@").map(|s| s.to_string())
     }
 
-    /// Blocks start if tty is already in use (e.g. by a login shell)
-    fn should_block_tty_start(&self) -> bool {
-        self.is_tty_instance()
-            .map(|tty| self.is_tty_logged_in(&tty))
-            .unwrap_or(false)
-    }
-
-    /// Returns true if *any* user is currently logged into the given tty (e.g., tty1)
     fn is_tty_logged_in(&self, tty_id: &str) -> bool {
-        let dev_path = format!("/dev/{}", tty_id);
-        match Command::new("fuser").arg(&dev_path).output() {
-            Ok(output) => !output.stdout.is_empty(),
-            Err(_) => false, // fallback: assume not in use
+        let tty_dev = format!("/dev/tty{}", tty_id.trim_start_matches("tty"));
+
+        let entries = match fs::read_dir("/proc") {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            if !file_name.to_string_lossy().chars().all(char::is_numeric) {
+                continue;
+            }
+
+            let pid = file_name.to_string_lossy();
+            let fd_path = format!("/proc/{}/fd", pid);
+
+            if let Ok(fds) = fs::read_dir(fd_path) {
+                for fd in fds.flatten() {
+                    if let Ok(target) = fs::read_link(fd.path()) {
+                        if let Some(link) = target.to_str() {
+                            if link == tty_dev {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        false
     }
 }
 
