@@ -12,8 +12,8 @@ use bloom::time::ProcessTimer;
 
 /// Check if root `/` is read-only and remount as read-write if needed.
 pub fn remount_root(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
@@ -50,8 +50,8 @@ fn is_root_readonly() -> Result<bool, BloomError> {
 
 /// Mount entries in /etc/fstab except the root `/`.
 pub fn mount_fstab_filesystems(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
     let fstab = File::open("/etc/fstab").map_err(BloomError::Io)?;
@@ -99,7 +99,7 @@ pub fn mount_fstab_filesystems(
 
         let (flags, data) = split_mount_options(options);
 
-        if let Err(e) = crate::fs::mount_fs(
+        if let Err(e) = crate::filesystem::mount_fs(
             Some(&resolved_source),
             target,
             Some(fstype),
@@ -121,7 +121,6 @@ pub fn mount_fstab_filesystems(
 
     Ok(())
 }
-
 
 /// Resolve UUID= or LABEL= sources to device paths
 /// For pseudo-filesystems like tmpfs, proc, etc., return as-is.
@@ -150,8 +149,6 @@ fn resolve_source(source: &str) -> Result<String, BloomError> {
         Err(BloomError::Custom(format!("Device {} does not exist", source)))
     }
 }
-
-
 
 fn resolve_symlink_target(base_dir: &str, name: &str) -> Result<String, BloomError> {
     let path = Path::new(base_dir).join(name);
@@ -207,8 +204,8 @@ fn split_mount_options(options: &str) -> (MsFlags, Option<String>) {
 }
 
 fn log_success(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
     timer: &ProcessTimer,
     level: LogLevel,
     msg: &str,
@@ -219,8 +216,8 @@ fn log_success(
 }
 
 fn log_error(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
     timer: &ProcessTimer,
     level: LogLevel,
     msg: &str,
@@ -231,8 +228,8 @@ fn log_error(
 }
 
 pub fn check_filesystem_health(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
     let fstab_path = "/etc/fstab";

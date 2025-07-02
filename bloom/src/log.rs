@@ -8,6 +8,7 @@ use terminal_size::{Width, terminal_size};
 use crate::status::LogLevel;
 use crate::time::format_duration;
 use crate::colour::color::{color_time, color_level, GREEN, RESET, BOLD};
+use crate::errors::BloomError;
 
 impl LogLevel {
     pub fn as_str(&self) -> &'static str {
@@ -20,7 +21,7 @@ impl LogLevel {
     }
 }
 
-/// A common logging interface.
+/// Common logging interface — no need for Arc/Mutex here.
 pub trait Logger {
     fn log(&mut self, level: LogLevel, message: &str, duration: Option<Duration>);
 }
@@ -29,7 +30,7 @@ pub trait Logger {
 
 pub trait ConsoleLogger {
     fn message(&mut self, level: LogLevel, message: &str, duration: Duration);
-    fn banner(&mut self, message: &str); 
+    fn banner(&mut self, message: &str);
 }
 
 pub struct ConsoleLoggerImpl {
@@ -80,6 +81,7 @@ impl ConsoleLogger for ConsoleLoggerImpl {
             println!("{}", line);
         }
     }
+
     fn banner(&mut self, message: &str) {
         println!("{BOLD}{GREEN}{message}{RESET}\n");
     }
@@ -89,6 +91,9 @@ impl ConsoleLogger for ConsoleLoggerImpl {
 
 pub trait FileLogger {
     fn log(&mut self, level: LogLevel, message: &str);
+
+    // No default implementation here: force explicit call on impl
+    fn initialize(&mut self, console_logger: &mut dyn ConsoleLogger) -> Result<(), BloomError>;
 }
 
 pub struct FileLoggerImpl {
@@ -108,32 +113,6 @@ impl FileLoggerImpl {
         }
     }
 
-    pub fn initialize(&mut self, console_logger: &mut impl ConsoleLogger) {
-        if self.has_initialized {
-            return;
-        }
-        self.maybe_write_session_header();
-
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.file_path)
-        {
-            for entry in &self.buffer {
-                let _ = writeln!(file, "{}", entry);
-            }
-        }
-        self.buffer.clear();
-        self.has_initialized = true;
-
-        // Log to console that file logger initialized, with zero elapsed time or near-zero
-        console_logger.message(
-            LogLevel::Info,
-            &format!("File logger initialized: {}", self.file_path),
-            Duration::from_secs(0),
-        );
-    }
-
     fn format_file(&self, level: LogLevel, message: &str) -> String {
         let now = chrono::Local::now();
         let timestamp = now.format("[%d-%m-%Y %H:%M:%S]").to_string();
@@ -141,9 +120,9 @@ impl FileLoggerImpl {
         format!("{level_str} {timestamp} {message}")
     }
 
-    fn maybe_write_session_header(&mut self) {
+    fn maybe_write_session_header(&mut self) -> Result<(), BloomError> {
         if self.has_initialized {
-            return;
+            return Ok(());
         }
 
         let is_existing_file = metadata(&self.file_path)
@@ -156,9 +135,10 @@ impl FileLoggerImpl {
             .open(&self.file_path)
         {
             if is_existing_file {
-                let _ = writeln!(file, "\n────────── NEW SESSION ──────────");
+                writeln!(file, "\n────────── NEW SESSION ──────────").map_err(BloomError::Io)?;
             }
         }
+        Ok(())
     }
 }
 
@@ -180,6 +160,34 @@ impl FileLogger for FileLoggerImpl {
             }
         }
     }
+
+    fn initialize(&mut self, console_logger: &mut dyn ConsoleLogger) -> Result<(), BloomError> {
+        if self.has_initialized {
+            return Ok(());
+        }
+
+        self.maybe_write_session_header()?;
+
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file_path)
+        {
+            for entry in &self.buffer {
+                writeln!(file, "{}", entry).map_err(BloomError::Io)?;
+            }
+        }
+        self.buffer.clear();
+        self.has_initialized = true;
+
+        console_logger.message(
+            LogLevel::Info,
+            &format!("File logger initialized: {}", self.file_path),
+            Duration::from_secs(0),
+        );
+
+        Ok(())
+    }
 }
 
 // === HELPERS ===
@@ -193,3 +201,4 @@ fn strip_ansi_codes(s: &str) -> String {
     let ansi_re = Regex::new(r"\x1b\[[0-9;]*m").unwrap();
     ansi_re.replace_all(s, "").to_string()
 }
+

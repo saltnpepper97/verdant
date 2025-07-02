@@ -86,6 +86,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mgr.shutdown(Arc::clone(&shutdown_flag))?; // <- graceful cleanup
     }
 
+    let socket_path = bloom::ipc::VERDANTD_SOCKET_PATH;
+    if std::path::Path::new(socket_path).exists() {
+        if let Err(e) = std::fs::remove_file(socket_path) {
+            let mut file = file_logger.lock().unwrap();
+            let msg = format!("Failed to remove verdantd socket: {}", e);
+            file.log(LogLevel::Warn, &msg);
+        }
+    }
+
     Ok(())
 }
 

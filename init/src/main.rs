@@ -1,7 +1,7 @@
 mod actions;
 mod device_manager;
 mod env;
-mod fs;
+mod filesystem;
 mod hardware_drivers;
 mod ipc_server;
 mod kernel;
@@ -13,6 +13,7 @@ mod service_manager;
 mod signal;
 mod utils;
 
+
 use std::{
     env::args,
     process::{Command, Stdio},
@@ -20,18 +21,27 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    path::Path,
     thread,
     time::Duration,
+    fs,
 };
 
 use bloom::log::{ConsoleLogger, FileLogger};
 use bloom::status::LogLevel;
+use bloom::ipc::INIT_SOCKET_PATH;
 
 use crate::service_manager::launch_verdant_service_manager;
 
 fn main() {
-    // Check for "test" argument to skip full init (useful for running under debugger/test harness)
-    if args().any(|arg| arg == "test") {
+    let is_test = args().any(|arg| arg == "test");
+
+    if !is_test && std::process::id() != 1 {
+        eprintln!("Verdant: Must be run as PID 1 (init).");
+        std::process::exit(1);
+    }
+
+    if is_test {
         eprintln!("Test mode detected, skipping full init.");
         return;
     }
@@ -49,11 +59,11 @@ fn main() {
     }
 }
 
-fn inner_main() {
-    let (raw_console_logger, file_logger, start_time) = run::boot();
 
-    let console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>> =
-        Arc::new(Mutex::new(raw_console_logger));
+fn inner_main() {
+    let (console_logger_impl, file_logger, start_time) = run::boot();
+
+    let console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>> = console_logger_impl;
     let file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>> = file_logger;
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -118,12 +128,14 @@ fn inner_main() {
     loop {
         if reboot_flag.load(Ordering::SeqCst) {
             log_shutdown(&console_logger, &file_logger, "Reboot");
+            remove_init_socket(&file_logger);
             let _ = actions::reboot();
             break;
         }
 
         if shutdown_flag.load(Ordering::SeqCst) {
             log_shutdown(&console_logger, &file_logger, "Shutdown");
+            remove_init_socket(&file_logger);
             let _ = actions::shutdown();
             break;
         }
@@ -165,3 +177,13 @@ fn log_shutdown(
     }
 }
 
+fn remove_init_socket(file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>) {
+    let path = Path::new(INIT_SOCKET_PATH);
+    if path.exists() {
+        if let Err(e) = fs::remove_file(path) {
+            if let Ok(mut file) = file_logger.lock() {
+                file.log(LogLevel::Warn, &format!("Failed to remove init socket: {}", e));
+            }
+        }
+    }
+}

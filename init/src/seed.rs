@@ -14,8 +14,8 @@ const SEED_SIZE: usize = 512;
 ///
 /// Reads a seed file, writes it to /dev/urandom, and regenerates a new seed.
 pub fn seed_entropy(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
@@ -30,12 +30,15 @@ pub fn seed_entropy(
     };
 
     // Step 2: Feed seed to kernel RNG
-    if let Ok(mut urandom) = OpenOptions::new().write(true).open("/dev/urandom") {
-        if let Err(e) = urandom.write_all(&seed) {
-            file_logger.log(LogLevel::Warn, &format!("Failed to write seed to /dev/urandom: {}", e));
+    match OpenOptions::new().write(true).open("/dev/urandom") {
+        Ok(mut urandom) => {
+            if let Err(e) = urandom.write_all(&seed) {
+                file_logger.log(LogLevel::Warn, &format!("Failed to write seed to /dev/urandom: {}", e));
+            }
         }
-    } else {
-        file_logger.log(LogLevel::Warn, "Could not open /dev/urandom for writing");
+        Err(_) => {
+            file_logger.log(LogLevel::Warn, "Could not open /dev/urandom for writing");
+        }
     }
 
     // Step 3: Generate new seed and persist
@@ -54,3 +57,4 @@ pub fn seed_entropy(
 
     Ok(())
 }
+

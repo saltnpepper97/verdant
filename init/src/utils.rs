@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::Path;
 use std::ffi::CString;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use bloom::status::LogLevel;
 use bloom::errors::BloomError;
@@ -10,8 +11,8 @@ use bloom::log::{ConsoleLogger, FileLogger};
 use bloom::time::ProcessTimer;
 
 pub fn set_hostname(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
     let hostname_path = "/etc/hostname";
@@ -51,8 +52,8 @@ pub fn set_hostname(
 }
 
 pub fn detect_timezone(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
 ) -> Result<Option<String>, BloomError> {
     let timer = ProcessTimer::start();
     let localtime_path = Path::new("/etc/localtime");
@@ -86,10 +87,11 @@ pub fn detect_timezone(
     Ok(None)
 }
 
-
+/// Synchronize system clock from hardware RTC using `/sbin/hwclock --hctosys --utc`
+/// Uses mutable refs because it runs synchronously and no need for locking.
 pub fn sync_clock_from_hardware(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
     let status = Command::new("/sbin/hwclock")
@@ -101,43 +103,54 @@ pub fn sync_clock_from_hardware(
 
     match status {
         Ok(s) if s.success() => {
-            log_success(console_logger, file_logger, &timer, LogLevel::Ok, "Synchronized system clock from RTC (UTC)");
+            console_logger.message(LogLevel::Ok, "Synchronized system clock from RTC (UTC)", timer.elapsed());
+            file_logger.log(LogLevel::Ok, "Synchronized system clock from RTC (UTC)");
             Ok(())
         }
         Ok(s) => {
             let msg = format!("hwclock exited with non-zero status: {}", s);
-            log_error(console_logger, file_logger, &timer, LogLevel::Warn, &msg);
+            console_logger.message(LogLevel::Warn, &msg, timer.elapsed());
+            file_logger.log(LogLevel::Warn, &msg);
             Err(BloomError::Custom(msg))
         }
         Err(e) => {
             let msg = format!("Failed to execute hwclock: {}", e);
-            log_error(console_logger, file_logger, &timer, LogLevel::Warn, &msg);
+            console_logger.message(LogLevel::Warn, &msg, timer.elapsed());
+            file_logger.log(LogLevel::Warn, &msg);
             Err(BloomError::Io(e))
         }
     }
 }
 
 fn log_success(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
     timer: &ProcessTimer,
     level: LogLevel,
     message: &str,
 ) {
     let elapsed = timer.elapsed();
-    console_logger.message(level, message, elapsed);
-    file_logger.log(level, message);
+    if let Ok(mut con_log) = console_logger.lock() {
+        con_log.message(level, message, elapsed);
+    }
+    if let Ok(mut file_log) = file_logger.lock() {
+        file_log.log(level, message);
+    }
 }
 
 fn log_error(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
     timer: &ProcessTimer,
     level: LogLevel,
     message: &str,
 ) {
     let elapsed = timer.elapsed();
-    console_logger.message(level, message, elapsed);
-    file_logger.log(level, message);
+    if let Ok(mut con_log) = console_logger.lock() {
+        con_log.message(level, message, elapsed);
+    }
+    if let Ok(mut file_log) = file_logger.lock() {
+        file_log.log(level, message);
+    }
 }
 

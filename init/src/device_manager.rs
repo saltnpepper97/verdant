@@ -1,6 +1,7 @@
 use std::{fs, io};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -29,8 +30,8 @@ fn detect_device_manager() -> Option<&'static str> {
 }
 
 pub fn start_device_manager(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
@@ -43,8 +44,12 @@ pub fn start_device_manager(
         match is_process_running(dm_name) {
             Ok(true) => {
                 let msg = format!("Device manager '{}' already running.", dm_name);
-                console_logger.message(LogLevel::Info, &msg, timer.elapsed());
-                file_logger.log(LogLevel::Info, &msg);
+                if let Ok(mut con_log) = console_logger.lock() {
+                    con_log.message(LogLevel::Info, &msg, timer.elapsed());
+                }
+                if let Ok(mut file_log) = file_logger.lock() {
+                    file_log.log(LogLevel::Info, &msg);
+                }
                 return Ok(());
             }
             Ok(false) => {
@@ -52,8 +57,12 @@ pub fn start_device_manager(
             }
             Err(e) => {
                 let msg = format!("Failed to check existing processes: {}", e);
-                console_logger.message(LogLevel::Warn, &msg, timer.elapsed());
-                file_logger.log(LogLevel::Warn, &msg);
+                if let Ok(mut con_log) = console_logger.lock() {
+                    con_log.message(LogLevel::Warn, &msg, timer.elapsed());
+                }
+                if let Ok(mut file_log) = file_logger.lock() {
+                    file_log.log(LogLevel::Warn, &msg);
+                }
             }
         }
 
@@ -73,27 +82,39 @@ pub fn start_device_manager(
         match child_res {
             Ok(_) => {
                 let msg = format!("Started device manager daemon: {}", dm_path);
-                console_logger.message(LogLevel::Ok, "Device manager started", timer.elapsed());
-                file_logger.log(LogLevel::Info, &msg);
+                if let Ok(mut con_log) = console_logger.lock() {
+                    con_log.message(LogLevel::Ok, "Device manager started", timer.elapsed());
+                }
+                if let Ok(mut file_log) = file_logger.lock() {
+                    file_log.log(LogLevel::Info, &msg);
+                }
                 Ok(())
             }
             Err(e) => {
                 let msg = format!("Failed to start device manager daemon '{}': {:?}", dm_path, e);
-                console_logger.message(LogLevel::Fail, "Device manager start failed", timer.elapsed());
-                file_logger.log(LogLevel::Fail, &msg);
+                if let Ok(mut con_log) = console_logger.lock() {
+                    con_log.message(LogLevel::Fail, "Device manager start failed", timer.elapsed());
+                }
+                if let Ok(mut file_log) = file_logger.lock() {
+                    file_log.log(LogLevel::Fail, &msg);
+                }
                 Err(BloomError::Custom(msg))
             }
         }
     } else {
         let msg = "No device manager daemon found on system";
-        console_logger.message(LogLevel::Warn, msg, timer.elapsed());
-        file_logger.log(LogLevel::Warn, msg);
+        if let Ok(mut con_log) = console_logger.lock() {
+            con_log.message(LogLevel::Warn, msg, timer.elapsed());
+        }
+        if let Ok(mut file_log) = file_logger.lock() {
+            file_log.log(LogLevel::Warn, msg);
+        }
         Err(BloomError::Custom(msg.to_string()))
     }
 }
 
 pub fn monitor_udev_events(
-    file_logger: &mut impl FileLogger,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
 ) -> Result<(), BloomError> {
 
     let monitor = MonitorBuilder::new()
@@ -101,7 +122,9 @@ pub fn monitor_udev_events(
         .listen()
         .map_err(BloomError::from)?;
 
-    file_logger.log(LogLevel::Info, "Started udev event monitor");
+    if let Ok(mut file_log) = file_logger.lock() {
+        file_log.log(LogLevel::Info, "Started udev event monitor");
+    }
 
     for event in monitor.iter() {
         let evtype = match event.event_type() {
@@ -116,25 +139,23 @@ pub fn monitor_udev_events(
             .unwrap_or_else(|| "<no devnode>".to_string());
 
         let msg = format!("udev event: {} on device {}", evtype, devnode);
-        file_logger.log(LogLevel::Info, &msg);
+        if let Ok(mut file_log) = file_logger.lock() {
+            file_log.log(LogLevel::Info, &msg);
+        }
     }
 
     Ok(())
 }
 
 fn is_process_running(name: &str) -> io::Result<bool> {
-    // Scan /proc for any process whose cmdline contains `name`
     for entry in fs::read_dir("/proc")? {
         let entry = entry?;
         let path = entry.path();
 
-        // Only check numeric dirs (process IDs)
         if let Some(pid_str) = path.file_name().and_then(|s| s.to_str()) {
             if pid_str.chars().all(|c| c.is_ascii_digit()) {
-                // Read cmdline file
                 let cmdline_path = path.join("cmdline");
                 if let Ok(cmdline) = fs::read(cmdline_path) {
-                    // cmdline is null-separated, so check if name is contained
                     if cmdline.windows(name.len()).any(|window| window == name.as_bytes()) {
                         return Ok(true);
                     }

@@ -4,7 +4,7 @@ use std::time::Duration;
 use std::thread::sleep;
 
 use nix::sys::socket::{socket, AddressFamily, SockType, SockFlag};
-use nix::libc::{sockaddr_in, AF_INET, sockaddr, in_addr, c_char,self};
+use nix::libc::{sockaddr_in, AF_INET, sockaddr, in_addr, c_char};
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -16,8 +16,8 @@ use bloom::time::ProcessTimer;
 ///   ip link set dev lo up
 ///   ip addr add 127.0.0.1/8 dev lo
 pub fn setup_loopback(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
@@ -47,36 +47,30 @@ pub fn setup_loopback(
 
 /// Bring up interface using ioctl SIOCSIFFLAGS
 fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError> {
-
-    // Define ifreq struct for ioctl
     #[repr(C)]
     #[derive(Copy, Clone)]
     struct Ifreq {
         ifr_name: [c_char; libc::IFNAMSIZ],
-        ifr_flags: libc::c_short, // keep c_short here, musl compatible
-        _pad: [u8; 24], // padding for rest of union, to size 40 bytes total
+        ifr_flags: libc::c_short,
+        _pad: [u8; 24],
     }
 
-    // Initialize ifreq
     let mut ifr: Ifreq = unsafe { zeroed() };
     for (dst, src) in ifr.ifr_name.iter_mut().zip(ifname.bytes()) {
         *dst = src as c_char;
     }
 
-    // Get current flags
     unsafe {
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS.try_into().unwrap(), &mut ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCGIFFLAGS failed for {}", ifname)));
         }
     }
 
-    // Set IFF_UP flag
     const IFF_UP: libc::c_short = 0x1;
     ifr.ifr_flags |= IFF_UP;
 
-    // Set flags back
     unsafe {
-        if libc::ioctl(sock, libc::SIOCSIFFLAGS.try_into().unwrap(), &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCSIFFLAGS failed for {}", ifname)));
         }
     }
@@ -86,7 +80,6 @@ fn bring_interface_up(sock: libc::c_int, ifname: &str) -> Result<(), BloomError>
 
 /// Assign 127.0.0.1/8 IP address to lo interface
 fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomError> {
-
     #[repr(C)]
     #[derive(Copy, Clone)]
     struct IfreqAddr {
@@ -94,12 +87,8 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
         ifr_addr: sockaddr,
     }
 
-    // Prepare sockaddr_in for 127.0.0.1
     let mut addr_in: sockaddr_in = unsafe { zeroed() };
     addr_in.sin_family = AF_INET as u16;
-
-    // IMPORTANT: s_addr is in network byte order (big endian)
-    // musl expects it as u32 in network byte order; use u32::from_be_bytes + u32::to_be()
     addr_in.sin_addr = in_addr {
         s_addr: u32::from_be_bytes([127, 0, 0, 1]),
     };
@@ -118,7 +107,7 @@ fn assign_loopback_address(sock: libc::c_int, ifname: &str) -> Result<(), BloomE
     }
 
     unsafe {
-        if libc::ioctl(sock, libc::SIOCSIFADDR.try_into().unwrap(), &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCSIFADDR failed for {}", ifname)));
         }
     }
@@ -141,7 +130,7 @@ fn is_interface_up(sock: libc::c_int, ifname: &str) -> Result<bool, BloomError> 
     }
 
     unsafe {
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS.try_into().unwrap(), &mut ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
             return Err(BloomError::Custom(format!("ioctl SIOCGIFFLAGS failed for {}", ifname)));
         }
     }
@@ -149,3 +138,4 @@ fn is_interface_up(sock: libc::c_int, ifname: &str) -> Result<bool, BloomError> 
     const IFF_UP: libc::c_short = 0x1;
     Ok(ifr.ifr_flags & IFF_UP != 0)
 }
+

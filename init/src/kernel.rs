@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::ffi::CString;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use nix::unistd::{fork, ForkResult, execvp};
 use nix::sys::wait::{waitpid, WaitStatus};
@@ -33,8 +34,8 @@ fn collect_modules_from_file(path: &Path) -> Result<Vec<String>, BloomError> {
 /// Loads kernel modules from multiple common paths.
 /// Logs a summary of successes/failures or "no modules found".
 pub fn load_kernel_modules(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
@@ -122,11 +123,15 @@ pub fn load_kernel_modules(
 
     if success_count > 0 {
         log_success(console_logger, file_logger, &timer, LogLevel::Info, simple_console_msg);
-        file_logger.log(LogLevel::Info, &msg);
+        if let Ok(mut file_log) = file_logger.lock() {
+            file_log.log(LogLevel::Info, &msg);
+        }
         Ok(())
     } else {
         log_error(console_logger, file_logger, &timer, LogLevel::Fail, simple_console_msg);
-        file_logger.log(LogLevel::Fail, &msg);
+        if let Ok(mut file_log) = file_logger.lock() {
+            file_log.log(LogLevel::Fail, &msg);
+        }
         Err(BloomError::Custom("Failed to load any kernel modules".into()))
     }
 }
@@ -134,8 +139,8 @@ pub fn load_kernel_modules(
 /// Applies kernel sysctl settings from common sysctl configuration files.
 /// Only applies keys where the current value differs from the desired value.
 pub fn apply_sysctl_settings(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
     let mut settings: HashMap<String, String> = HashMap::new();
@@ -194,7 +199,9 @@ pub fn apply_sysctl_settings(
     }
 
     let summary = format!("Sysctl settings: {} applied, {} skipped, {} failed", applied, skipped, failed);
-    file_logger.log(LogLevel::Info, &summary);
+    if let Ok(mut file_log) = file_logger.lock() {
+        file_log.log(LogLevel::Info, &summary);
+    }
 
     // Final console status based on outcome
     let (level, status_msg) = if applied > 0 {
@@ -205,7 +212,9 @@ pub fn apply_sysctl_settings(
         (LogLevel::Warn, "Some sysctl parameters failed")
     };
 
-    console_logger.message(level, status_msg, timer.elapsed());
+    if let Ok(mut con_log) = console_logger.lock() {
+        con_log.message(level, status_msg, timer.elapsed());
+    }
 
     Ok(())
 }
@@ -230,26 +239,34 @@ fn load_sysctl_file(path: &Path, map: &mut std::collections::HashMap<String, Str
 }
 
 fn log_success(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
     timer: &ProcessTimer,
     level: LogLevel,
     msg: &str,
 ) {
     let elapsed = timer.elapsed();
-    console_logger.message(level, msg, elapsed);
-    file_logger.log(level, msg);
+    if let Ok(mut con_log) = console_logger.lock() {
+        con_log.message(level, msg, elapsed);
+    }
+    if let Ok(mut file_log) = file_logger.lock() {
+        file_log.log(level, msg);
+    }
 }
 
 fn log_error(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
     timer: &ProcessTimer,
     level: LogLevel,
     msg: &str,
 ) {
     let elapsed = timer.elapsed();
-    console_logger.message(level, msg, elapsed);
-    file_logger.log(level, msg);
+    if let Ok(mut con_log) = console_logger.lock() {
+        con_log.message(level, msg, elapsed);
+    }
+    if let Ok(mut file_log) = file_logger.lock() {
+        file_log.log(level, msg);
+    }
 }
 

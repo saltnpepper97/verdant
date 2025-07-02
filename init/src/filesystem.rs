@@ -1,6 +1,7 @@
 use std::fs::{create_dir_all, File};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use nix::errno::Errno;
 use nix::mount::{mount, MsFlags};
@@ -12,29 +13,31 @@ use bloom::time::ProcessTimer;
 
 /// Mounts standard Linux virtual filesystems: /proc, /sys, /dev, /run
 pub fn mount_virtual_filesystems(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
-) -> Result<(), BloomError> {
+    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
+    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
+) -> Result<(), BloomError>
+{
     let timer = ProcessTimer::start();
 
-    mount_fs(Some("proc"), "/proc", Some("proc"), MsFlags::empty(), None, "proc", console_logger, file_logger, &timer)?;
-    mount_fs(Some("sysfs"), "/sys", Some("sysfs"), MsFlags::empty(), None, "sysfs", console_logger, file_logger, &timer)?;
-    mount_fs(Some("devtmpfs"), "/dev", Some("devtmpfs"), MsFlags::empty(), None, "devtmpfs", console_logger, file_logger, &timer)?;
-    mount_fs(Some("tmpfs"), "/run", Some("tmpfs"), MsFlags::empty(), Some("mode=755"), "tmpfs", console_logger, file_logger, &timer)?;
+    let mut con_log = console_logger.lock().unwrap();
+    let mut file_log = file_logger.lock().unwrap();
 
-    // Ensure /run/lock exists
-    ensure_dir("/run/lock", "runtime lock directory", console_logger, file_logger, &timer)?;
+    mount_fs(Some("proc"), "/proc", Some("proc"), MsFlags::empty(), None, "proc", &mut *con_log, &mut *file_log, &timer)?;
+    mount_fs(Some("sysfs"), "/sys", Some("sysfs"), MsFlags::empty(), None, "sysfs", &mut *con_log, &mut *file_log, &timer)?;
+    mount_fs(Some("devtmpfs"), "/dev", Some("devtmpfs"), MsFlags::empty(), None, "devtmpfs", &mut *con_log, &mut *file_log, &timer)?;
+    mount_fs(Some("tmpfs"), "/run", Some("tmpfs"), MsFlags::empty(), Some("mode=755"), "tmpfs", &mut *con_log, &mut *file_log, &timer)?;
 
-    // Ensure /run/verdant exists
-    ensure_dir("/run/verdant", "Verdant runtime directory", console_logger, file_logger, &timer)?;
+    ensure_dir("/run/lock", "runtime lock directory", &mut *con_log, &mut *file_log, &timer)?;
+    ensure_dir("/run/verdant", "Verdant runtime directory", &mut *con_log, &mut *file_log, &timer)?;
 
     Ok(())
 }
 
+
 /// Mount securityfs at /sys/kernel/security
 pub fn mount_securityfs(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
@@ -59,8 +62,8 @@ pub fn mount_fs(
     flags: MsFlags,
     data: Option<&str>,
     fs_name: &str,
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
     timer: &ProcessTimer,
 ) -> Result<(), BloomError> {
     if source == Some("none") || target == "none" {
@@ -102,7 +105,6 @@ pub fn mount_fs(
     }
 }
 
-
 /// Check if the target is mounted by parsing `/proc/self/mountinfo`
 fn is_mounted(target: &str) -> Result<bool, BloomError> {
     let file = File::open("/proc/self/mountinfo")?;
@@ -120,8 +122,8 @@ fn is_mounted(target: &str) -> Result<bool, BloomError> {
 fn ensure_dir(
     path: &str,
     desc: &str,
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
     timer: &ProcessTimer,
 ) -> Result<(), BloomError> {
     let p = Path::new(path);
@@ -141,25 +143,27 @@ fn ensure_dir(
 }
 
 fn log_success(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
     timer: &ProcessTimer,
     level: LogLevel,
     msg: &str,
 ) {
     let elapsed = timer.elapsed();
+
     console_logger.message(level, msg, elapsed);
     file_logger.log(level, msg);
 }
 
 fn log_error(
-    console_logger: &mut impl ConsoleLogger,
-    file_logger: &mut impl FileLogger,
+    console_logger: &mut dyn ConsoleLogger,
+    file_logger: &mut dyn FileLogger,
     timer: &ProcessTimer,
     level: LogLevel,
     msg: &str,
 ) {
     let elapsed = timer.elapsed();
+
     console_logger.message(level, msg, elapsed);
     file_logger.log(level, msg);
 }
