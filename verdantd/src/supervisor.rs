@@ -119,13 +119,18 @@ impl Supervisor {
         result
     }
 
-    /// Check if child process has exited, update state accordingly
+    /// Check if child process has exited, update state accordingly.
+    /// Distinguish clean exit (status.success()) and failure.
     fn child_has_exited(&mut self) -> bool {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
-                Ok(Some(_)) => {
+                Ok(Some(status)) => {
                     self.child = None;
-                    self.state = ServiceState::Stopped;
+                    if status.success() {
+                        self.state = ServiceState::Stopped;  // clean exit
+                    } else {
+                        self.state = ServiceState::Failed;   // failed exit code
+                    }
                     true
                 }
                 Ok(None) => false,
@@ -158,7 +163,6 @@ impl Supervisor {
         };
 
         for entry in proc_dir.flatten() {
-            // Bind the filename first to extend lifetime and avoid temporary drop error
             let file_name = entry.file_name();
             let pid_str = match file_name.to_str() {
                 Some(s) => s,
@@ -217,6 +221,11 @@ impl Supervisor {
                     self.state = ServiceState::Stopped;
                     thread::sleep(Duration::from_secs(1));
                     continue;
+                }
+
+                // Do NOT restart if exited cleanly
+                if self.state == ServiceState::Stopped {
+                    break; // Clean exit, stop restarting
                 }
 
                 match self.service.restart {
