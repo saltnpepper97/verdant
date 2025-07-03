@@ -5,6 +5,7 @@ mod ordering;
 mod parser;
 mod process;
 mod service_file;
+mod shutdown_manager;
 mod supervisor;
 
 use std::sync::{Arc, Mutex, mpsc};
