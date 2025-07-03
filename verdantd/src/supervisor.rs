@@ -23,7 +23,6 @@ pub struct Supervisor {
     console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
     file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>>,
 
-    // Track if currently restarting to avoid log spam
     restarting: bool,
 }
 
@@ -59,14 +58,19 @@ impl Supervisor {
         }
         self.restart_count = 0;
         self.restarting = false;
+
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            file.log(LogLevel::Info, &format!("Service '{}' started", self.service.name));
+        }
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<(), BloomError> {
         if let Some(mut child) = self.child.take() {
             self.state = ServiceState::Stopping;
-
             let pid = child.id();
+
             {
                 let mut con = self.console_logger.lock().unwrap();
                 let mut file = self.file_logger.lock().unwrap();
@@ -81,6 +85,7 @@ impl Supervisor {
                 thread::sleep(Duration::from_millis(100));
             }
 
+            // Force kill if needed
             nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(pid as i32),
                 nix::sys::signal::Signal::SIGKILL,
@@ -95,7 +100,7 @@ impl Supervisor {
             }
 
             self.state = ServiceState::Failed;
-            Err(BloomError::Custom(format!("Failed to stop service '{}'", self.service.name)))
+            return Err(BloomError::Custom(format!("Failed to stop service '{}'", self.service.name)));
         } else {
             self.state = ServiceState::Stopped;
             Ok(())
@@ -114,26 +119,28 @@ impl Supervisor {
         result
     }
 
+    /// Check if child process has exited, update state accordingly
     fn child_has_exited(&mut self) -> bool {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(_)) => {
                     self.child = None;
                     self.state = ServiceState::Stopped;
-                    return true;
+                    true
                 }
-                Ok(None) => return false,
+                Ok(None) => false,
                 Err(_) => {
+                    self.child = None;
                     self.state = ServiceState::Failed;
-                    return true;
+                    true
                 }
             }
+        } else {
+            true
         }
-        true
     }
 
-    /// Detect if tty service has logged-in user by checking /proc for
-    /// any non-getty processes holding /dev/ttyX
+    /// Detect active logged-in user on tty@ services
     fn is_tty_logged_in(&self) -> bool {
         if !self.service.name.starts_with("tty@") {
             return false;
@@ -151,6 +158,7 @@ impl Supervisor {
         };
 
         for entry in proc_dir.flatten() {
+            // Bind the filename first to extend lifetime and avoid temporary drop error
             let file_name = entry.file_name();
             let pid_str = match file_name.to_str() {
                 Some(s) => s,
@@ -161,7 +169,6 @@ impl Supervisor {
                 Err(_) => continue,
             };
 
-            // Check all fds for this pid
             let fd_dir_path = format!("/proc/{}/fd", pid);
             let fd_dir = match fs::read_dir(fd_dir_path) {
                 Ok(d) => d,
@@ -169,15 +176,14 @@ impl Supervisor {
             };
 
             for fd_entry in fd_dir.flatten() {
-                let fd_path = fd_entry.path();
-                if let Ok(link_target) = fs::read_link(&fd_path) {
+                if let Ok(link_target) = fs::read_link(fd_entry.path()) {
                     if link_target == Path::new(&tty_path) {
-                        // Check process name (comm) to exclude getty and agetty
+                        // Exclude getty/agetty processes (login prompts)
                         let comm_path = format!("/proc/{}/comm", pid);
                         if let Ok(comm) = fs::read_to_string(&comm_path) {
                             let proc_name = comm.trim();
                             if proc_name != "getty" && proc_name != "agetty" {
-                                return true; // found logged-in user process on tty
+                                return true;
                             }
                         }
                     }
@@ -187,7 +193,9 @@ impl Supervisor {
         false
     }
 
+    /// Main supervise loop for this service
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+        // Start service if not running
         if self.child.is_none() {
             self.start()?;
         }
@@ -204,6 +212,7 @@ impl Supervisor {
                     break;
                 }
 
+                // For tty@ services, only restart if no logged-in user
                 if self.is_tty_logged_in() {
                     self.state = ServiceState::Stopped;
                     thread::sleep(Duration::from_secs(1));

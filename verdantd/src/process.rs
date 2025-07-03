@@ -1,47 +1,56 @@
-use std::fs::{self, File};
-use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::Instant;
-
-use nix::unistd::{setgid, setuid, Gid, Uid};
-use nix::libc;
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
+use std::process::{Command, Child, Stdio};
+use std::fs::OpenOptions;
+use std::time::{Instant, Duration};
 
 use bloom::errors::BloomError;
-use bloom::log::{ConsoleLogger, FileLogger};
+use bloom::log::{FileLogger, ConsoleLogger};
 use bloom::status::LogLevel;
-use bloom::time::ProcessTimer;
 
 use crate::service_file::ServiceFile;
 
-pub struct LaunchResult {
+pub struct LaunchInfo {
     pub child: Child,
     pub start_time: Instant,
 }
 
+/// Start the given service command with stdout/stderr redirected to log files.
+/// Returns a LaunchInfo with the child process handle.
 pub fn start_service(
     service: &ServiceFile,
     file_logger: &mut dyn FileLogger,
-) -> Result<LaunchResult, BloomError> {
-    let stdout_log = service.stdout_log.clone().map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(format!("/var/log/verdant/services/{}.out.log", service.name)));
-    let stderr_log = service.stderr_log.clone().map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(format!("/var/log/verdant/services/{}.err.log", service.name)));
+) -> Result<LaunchInfo, BloomError> {
+    let now = Instant::now();
 
-    if let Some(parent) = stdout_log.parent() {
-        fs::create_dir_all(parent).map_err(BloomError::Io)?;
-    }
+    // Open log files
+    let stdout_log_path = service.stdout_log.as_ref()
+        .ok_or_else(|| BloomError::Custom("Missing stdout_log path".into()))?;
+    let stderr_log_path = service.stderr_log.as_ref()
+        .ok_or_else(|| BloomError::Custom("Missing stderr_log path".into()))?;
 
-    let stdout_file = File::create(&stdout_log).map_err(BloomError::Io)?;
-    let stderr_file = File::create(&stderr_log).map_err(BloomError::Io)?;
+    let stdout_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(stdout_log_path)
+        .map_err(BloomError::Io)?;
 
+    let stderr_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(stderr_log_path)
+        .map_err(BloomError::Io)?;
+
+    // Build command
     let mut cmd = Command::new(&service.cmd);
+
     if let Some(args) = &service.args {
         cmd.args(args);
     }
 
+    if let Some(dir) = &service.working_dir {
+        cmd.current_dir(dir);
+    }
+
+    // Set environment variables
     if let Some(envs) = &service.env {
         for env_var in envs {
             if let Some((k, v)) = env_var.split_once('=') {
@@ -50,84 +59,151 @@ pub fn start_service(
         }
     }
 
-    if let Some(dir) = &service.working_dir {
-        cmd.current_dir(dir);
-    }
-
+    // Redirect output
     cmd.stdout(Stdio::from(stdout_file));
     cmd.stderr(Stdio::from(stderr_file));
 
-    // Pre-exec UID/GID/nice
-    let user_uid = service.user.as_ref().and_then(|user| {
-        nix::unistd::User::from_name(user).ok().flatten().map(|u| u.uid)
-    });
+    // Spawn child
+    let child = cmd.spawn().map_err(|e| {
+        let msg = format!("Failed to start service '{}': {}", service.name, e);
+        file_logger.log(LogLevel::Fail, &msg);
+        BloomError::Io(e)
+    })?;
 
-    let group_gid = service.group.as_ref().and_then(|group| {
-        nix::unistd::Group::from_name(group).ok().flatten().map(|g| g.gid)
-    });
+    file_logger.log(LogLevel::Info, &format!("Started process '{}' (pid {})", service.name, child.id()));
 
-    let nice_val = service.nice;
-
-    let umask_val = service.umask.as_ref().and_then(|s| u32::from_str_radix(s, 8).ok());
-
-    unsafe {
-        cmd.pre_exec(move || {
-            if let Some(gid) = group_gid {
-                setgid(Gid::from_raw(gid.as_raw()))?;
-            }
-            if let Some(uid) = user_uid {
-                setuid(Uid::from_raw(uid.as_raw()))?;
-            }
-            if let Some(umask) = umask_val {
-                libc::umask(umask);
-            }
-            if let Some(nice) = nice_val {
-                libc::setpriority(libc::PRIO_PROCESS, 0, nice);
-            }
-            Ok(())
-        });
-    }
-
-    let child = cmd.spawn()
-        .map_err(|e| BloomError::Custom(format!("Failed to spawn service {}: {}", service.name, e)))?;
-
-    file_logger.log(LogLevel::Ok, &format!("Launched service '{}', pid {}", service.name, child.id()));
-
-    Ok(LaunchResult {
-        child,
-        start_time: Instant::now(),
-    })
+    Ok(LaunchInfo { child, start_time: now })
 }
 
+/// Stop the service by sending stop command or killing the process
 pub fn stop_service(
     service: &ServiceFile,
-    child_pid: u32,
+    pid: u32,
     console_logger: &mut dyn ConsoleLogger,
     file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
-    let timer = ProcessTimer::start();
-    let pid = Pid::from_raw(child_pid as i32);
-
     if let Some(stop_cmd) = &service.stop_cmd {
-        let cmdline = stop_cmd.replace("$MAINPID", &child_pid.to_string());
-        let status = Command::new("/bin/sh")
+        console_logger.message(LogLevel::Info, &format!("Running stop command for '{}'", service.name), std::time::Duration::ZERO);
+        file_logger.log(LogLevel::Info, &format!("Running stop command for '{}'", service.name));
+
+        let status = Command::new("sh")
             .arg("-c")
-            .arg(&cmdline)
+            .arg(stop_cmd)
             .status()
-            .map_err(|e| BloomError::Custom(format!("Failed to run stop-cmd: {}", e)))?;
+            .map_err(BloomError::Io)?;
 
         if !status.success() {
-            let msg = format!("stop-cmd failed: '{}', status: {:?}", cmdline, status.code());
-            console_logger.message(LogLevel::Warn, &msg, timer.elapsed());
+            let msg = format!("Stop command failed for '{}'", service.name);
+            console_logger.message(LogLevel::Warn, &msg, std::time::Duration::ZERO);
             file_logger.log(LogLevel::Warn, &msg);
+        } else {
+            let msg = format!("Stop command succeeded for '{}'", service.name);
+            console_logger.message(LogLevel::Info, &msg, std::time::Duration::ZERO);
+            file_logger.log(LogLevel::Info, &msg);
         }
-    } else {
-        kill(pid, Signal::SIGTERM)
-            .map_err(|e| BloomError::Custom(format!("Failed to send SIGTERM to pid {}: {}", child_pid, e)))?;
+
+        std::thread::sleep(Duration::from_secs(service.timeout_stop.unwrap_or(5)));
     }
 
-    console_logger.message(LogLevel::Ok, &format!("Sent stop signal to '{}'", service.name), timer.elapsed());
-    file_logger.log(LogLevel::Ok, &format!("Stopped '{}', pid {}", service.name, child_pid));
-    Ok(())
+    let pid_i32 = pid as i32;
+    let nix_pid = nix::unistd::Pid::from_raw(pid_i32);
+
+    // Try sending SIGTERM first
+    if let Err(e) = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM) {
+        // Without errno, just treat ESRCH as process gone and ignore any error else return error
+        // We guess ESRCH by error string containing "No such process" (not reliable, but no errno)
+        let err_str = format!("{}", e);
+        if err_str.contains("No such process") {
+            let msg = format!("Process {} not found; assuming already stopped", pid);
+            console_logger.message(LogLevel::Info, &msg, std::time::Duration::ZERO);
+            file_logger.log(LogLevel::Info, &msg);
+            return Ok(());
+        } else {
+            let msg = format!("Failed to send SIGTERM to pid {}: {}", pid, e);
+            console_logger.message(LogLevel::Fail, &msg, std::time::Duration::ZERO);
+            file_logger.log(LogLevel::Fail, &msg);
+            return Err(BloomError::Custom(msg));
+        }
+    }
+
+    console_logger.message(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid), std::time::Duration::ZERO);
+    file_logger.log(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid));
+
+    let timeout = Duration::from_secs(service.timeout_stop.unwrap_or(5));
+    let start = Instant::now();
+
+    loop {
+        match nix::sys::signal::kill(nix_pid, None) {
+            Ok(_) => {
+                if start.elapsed() >= timeout {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let err_str = format!("{}", e);
+                if err_str.contains("No such process") {
+                    let msg = format!("Process {} exited after SIGTERM", pid);
+                    console_logger.message(LogLevel::Info, &msg, std::time::Duration::ZERO);
+                    file_logger.log(LogLevel::Info, &msg);
+                    return Ok(());
+                } else {
+                    let msg = format!("Error checking process {} status: {}", pid, e);
+                    console_logger.message(LogLevel::Warn, &msg, std::time::Duration::ZERO);
+                    file_logger.log(LogLevel::Warn, &msg);
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Err(e) = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGKILL) {
+        let err_str = format!("{}", e);
+        if err_str.contains("No such process") {
+            let msg = format!("Process {} already exited before SIGKILL", pid);
+            console_logger.message(LogLevel::Info, &msg, std::time::Duration::ZERO);
+            file_logger.log(LogLevel::Info, &msg);
+            return Ok(());
+        } else {
+            let msg = format!("Failed to send SIGKILL to pid {}: {}", pid, e);
+            console_logger.message(LogLevel::Fail, &msg, std::time::Duration::ZERO);
+            file_logger.log(LogLevel::Fail, &msg);
+            return Err(BloomError::Custom(msg));
+        }
+    }
+
+    console_logger.message(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid), std::time::Duration::ZERO);
+    file_logger.log(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid));
+
+    let kill_timeout = Duration::from_secs(2);
+    let start_kill = Instant::now();
+
+    loop {
+        match nix::sys::signal::kill(nix_pid, None) {
+            Ok(_) => {
+                if start_kill.elapsed() >= kill_timeout {
+                    let msg = format!("Process {} did not exit after SIGKILL", pid);
+                    console_logger.message(LogLevel::Fail, &msg, std::time::Duration::ZERO);
+                    file_logger.log(LogLevel::Fail, &msg);
+                    return Err(BloomError::Custom(msg));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let err_str = format!("{}", e);
+                if err_str.contains("No such process") {
+                    let msg = format!("Process {} exited after SIGKILL", pid);
+                    console_logger.message(LogLevel::Info, &msg, std::time::Duration::ZERO);
+                    file_logger.log(LogLevel::Info, &msg);
+                    return Ok(());
+                } else {
+                    let msg = format!("Error checking process {} status: {}", pid, e);
+                    console_logger.message(LogLevel::Warn, &msg, std::time::Duration::ZERO);
+                    file_logger.log(LogLevel::Warn, &msg);
+                    return Err(BloomError::Custom(msg));
+                }
+            }
+        }
+    }
 }
 

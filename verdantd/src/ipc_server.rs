@@ -19,9 +19,10 @@ pub fn run_ipc_server(
 ) -> std::io::Result<()> {
     use std::time::Duration;
 
+    // Clone the logger Arc handles inside the lock guard scope to extend their lifetime
     let (console_logger, file_logger) = {
         let sm = service_manager.lock().unwrap();
-        (sm.get_console_logger(), sm.get_file_logger())
+        (sm.get_console_logger().clone(), sm.get_file_logger().clone())
     };
 
     let socket_path = Path::new(VERDANTD_SOCKET_PATH);
@@ -48,7 +49,6 @@ pub fn run_ipc_server(
         }
     }
 
-    // Send ready signal if sender provided
     if let Some(tx) = ready_tx {
         let _ = tx.send(());
     }
@@ -56,11 +56,11 @@ pub fn run_ipc_server(
     for stream_result in listener.incoming() {
         match stream_result {
             Ok(mut stream) => {
-                let sm = Arc::clone(&service_manager);
-                if let Err(e) = handle_client(&mut stream, sm, Arc::clone(&shutdown_flag)) {
+                let sm_clone = Arc::clone(&service_manager);
+                if let Err(e) = handle_client(&mut stream, sm_clone, Arc::clone(&shutdown_flag)) {
                     let (console_logger, file_logger) = {
                         let sm = service_manager.lock().unwrap();
-                        (sm.get_console_logger(), sm.get_file_logger())
+                        (sm.get_console_logger().clone(), sm.get_file_logger().clone())
                     };
                     let msg = format!("Error handling IPC client: {}", e);
                     if let Ok(mut con) = console_logger.lock() {
@@ -74,7 +74,7 @@ pub fn run_ipc_server(
             Err(e) => {
                 let (console_logger, file_logger) = {
                     let sm = service_manager.lock().unwrap();
-                    (sm.get_console_logger(), sm.get_file_logger())
+                    (sm.get_console_logger().clone(), sm.get_file_logger().clone())
                 };
                 let msg = format!("Failed to accept IPC connection: {}", e);
                 if let Ok(mut con) = console_logger.lock() {
@@ -119,7 +119,6 @@ fn handle_client(
 
     match request.command {
         IpcCommand::Shutdown | IpcCommand::Reboot => {
-            // Step 1: Acknowledge request immediately
             let ack = IpcResponse {
                 success: true,
                 message: format!("{:?} initiated", request.command),
@@ -128,7 +127,6 @@ fn handle_client(
             let _ = stream.write_all(&serialize_response(&ack));
             let _ = stream.flush();
 
-            // Step 2: Spawn thread to coordinate shutdown
             let sm = Arc::clone(&service_manager);
             let shutdown_flag_clone = Arc::clone(&shutdown_flag);
             let cmd = request.command.clone();
@@ -141,8 +139,9 @@ fn handle_client(
                     Err(_) => return,
                 };
 
-                let console_logger = sm_guard.get_console_logger();
-                let file_logger = sm_guard.get_file_logger();
+                // Clone logger handles before calling shutdown to avoid simultaneous borrow
+                let console_logger = sm_guard.get_console_logger().clone();
+                let file_logger = sm_guard.get_file_logger().clone();
 
                 let shutdown_result = sm_guard.shutdown();
 
@@ -163,7 +162,6 @@ fn handle_client(
                     }
                 }
 
-                // Step 3: Send shutdown/reboot command to init
                 let init_request = IpcRequest {
                     target: IpcTarget::Init,
                     command: cmd,
