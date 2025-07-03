@@ -193,19 +193,27 @@ impl Supervisor {
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
-            let logged_in = self.is_tty_logged_in();
-
-            if self.service.name.starts_with("tty@") && logged_in {
-                continue;
-            } else {
-                self.set_state(ServiceState::Stopped);
-            }
-
             match self.child_has_exited() {
                 Some(true) => {
                     if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
                         break;
                     }
+
+            if self.service.name.starts_with("tty@") {
+                if self.is_tty_logged_in() {
+                    break;
+                } else {
+                    if !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                        break;
+                    }
+                }
+            } else {
+                if  !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                    break;
+                }
+            }
+
+
                 }
                 Some(false) => {
                     self.set_state(ServiceState::Running);
