@@ -114,6 +114,7 @@ fn inner_main() {
     // Install signal handlers (simplified, no global blocking)
     signal::install_signal_handlers(
         Arc::clone(&shutdown_flag),
+        Arc::clone(&reboot_flag),
         Arc::clone(&file_logger),
         Arc::clone(&console_logger),
         thread::current(),
