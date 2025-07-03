@@ -16,8 +16,6 @@ pub fn run_ipc_server(
     service_manager: Arc<Mutex<ServiceManager>>,
     shutdown_flag: Arc<AtomicBool>,
     ready_tx: Option<mpsc::Sender<()>>,
-    shutdown_complete_tx: Option<Arc<Mutex<Option<mpsc::Sender<()>>>>>,
-    shutdown_complete_rx: Arc<Mutex<mpsc::Receiver<()>>>,
 ) -> std::io::Result<()> {
     use std::time::Duration;
 
@@ -59,17 +57,7 @@ pub fn run_ipc_server(
         match stream_result {
             Ok(mut stream) => {
                 let sm = Arc::clone(&service_manager);
-                let shutdown_flag_clone = Arc::clone(&shutdown_flag);
-                let shutdown_complete_tx_clone = shutdown_complete_tx.clone();
-                let shutdown_complete_rx_clone = Arc::clone(&shutdown_complete_rx);
-
-                if let Err(e) = handle_client(
-                    &mut stream,
-                    sm,
-                    shutdown_flag_clone,
-                    shutdown_complete_tx_clone,
-                    shutdown_complete_rx_clone,
-                ) {
+                if let Err(e) = handle_client(&mut stream, sm, Arc::clone(&shutdown_flag)) {
                     let (console_logger, file_logger) = {
                         let sm = service_manager.lock().unwrap();
                         (sm.get_console_logger(), sm.get_file_logger())
@@ -106,8 +94,6 @@ fn handle_client(
     stream: &mut UnixStream,
     service_manager: Arc<Mutex<ServiceManager>>,
     shutdown_flag: Arc<AtomicBool>,
-    shutdown_complete_tx: Option<Arc<Mutex<Option<mpsc::Sender<()>>>>>,
-    shutdown_complete_rx: Arc<Mutex<mpsc::Receiver<()>>>,
 ) -> std::io::Result<()> {
     use std::io::BufReader;
     use std::thread;
@@ -144,24 +130,27 @@ fn handle_client(
             // Step 2: Spawn thread to coordinate shutdown
             let sm = Arc::clone(&service_manager);
             let shutdown_flag_clone = Arc::clone(&shutdown_flag);
-            let shutdown_complete_tx_clone = shutdown_complete_tx.clone();
-            let shutdown_complete_rx_clone = Arc::clone(&shutdown_complete_rx);
             thread::spawn(move || {
                 // Step 3: Set shutdown flag BEFORE shutting down services
                 shutdown_flag_clone.store(true, Ordering::SeqCst);
 
-                // Step 4: Wait for main thread to finish shutdown
-                {
-                    let rx_lock = shutdown_complete_rx_clone.lock().unwrap();
-                    let _ = rx_lock.recv();
-                }
-
-                // Step 5: Send shutdown/reboot command to init
-                let sm_guard = match sm.lock() {
+                let mut sm_guard = match sm.lock() {
                     Ok(sm) => sm,
                     Err(_) => return,
                 };
 
+                // Step 4: Call ServiceManager shutdown method
+                if let Err(e) = sm_guard.shutdown(Arc::clone(&shutdown_flag_clone)) {
+                    let msg = format!("Failed to shutdown services: {}", e);
+                    if let Ok(mut con) = sm_guard.get_console_logger().lock() {
+                        con.message(LogLevel::Fail, &msg, std::time::Duration::ZERO);
+                    }
+                    if let Ok(mut file) = sm_guard.get_file_logger().lock() {
+                        file.log(LogLevel::Fail, &msg);
+                    }
+                }
+
+                // Step 5: Send shutdown/reboot command to init
                 let init_request = IpcRequest {
                     target: IpcTarget::Init,
                     command: request.command.clone(),

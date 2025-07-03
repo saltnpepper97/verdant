@@ -1,6 +1,5 @@
 use std::process::Child;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -98,7 +97,7 @@ impl Supervisor {
         result
     }
 
-    pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+    pub fn supervise_loop(&mut self) -> Result<(), BloomError> {
         let mut last_state = self.state;
 
         if self.child.is_none() {
@@ -110,20 +109,6 @@ impl Supervisor {
         }
 
         loop {
-            if shutdown_flag.load(Ordering::SeqCst) {
-                {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(
-                        LogLevel::Info,
-                        &format!("Shutdown flag detected. Attempting graceful stop of '{}'", self.service.name),
-                    );
-                }
-
-                let _ = self.shutdown();
-                self.wait_for_exit_with_timeout(Duration::from_secs(5));
-                break;
-            }
-
             let current_state = match self.child.as_mut() {
                 Some(child) => match child.try_wait() {
                     Ok(Some(status)) => {
@@ -144,11 +129,6 @@ impl Supervisor {
                                     thread::sleep(Duration::from_secs(delay));
                                 }
 
-                                if shutdown_flag.load(Ordering::SeqCst) {
-                                    let _ = self.shutdown();
-                                    return Ok(());
-                                }
-
                                 self.state = ServiceState::Starting;
                                 if let Err(e) = self.start() {
                                     self.state = ServiceState::Failed;
@@ -161,11 +141,6 @@ impl Supervisor {
                                     self.restart_count += 1;
                                     if let Some(delay) = self.service.restart_delay {
                                         thread::sleep(Duration::from_secs(delay));
-                                    }
-
-                                    if shutdown_flag.load(Ordering::SeqCst) {
-                                        let _ = self.shutdown();
-                                        return Ok(());
                                     }
 
                                     self.state = ServiceState::Starting;

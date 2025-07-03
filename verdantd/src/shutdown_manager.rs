@@ -92,5 +92,9 @@ impl ShutdownManager {
 
         Ok(())
     }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.is_shutting_down.load(Ordering::SeqCst)
+    }
 }
 

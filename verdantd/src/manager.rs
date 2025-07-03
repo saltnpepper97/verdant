@@ -53,7 +53,6 @@ impl ServiceManager {
         );
 
         self.supervisors.insert(supervisor.service.name.clone(), supervisor);
-
         Ok(())
     }
 
@@ -118,7 +117,6 @@ impl ServiceManager {
     pub fn spawn_supervisor_thread(
         &mut self,
         name: String,
-        shutdown_flag: Arc<AtomicBool>,
     ) -> Result<(), BloomError> {
         if self.handles.contains_key(&name) {
             return Ok(());
@@ -127,7 +125,6 @@ impl ServiceManager {
         let supervisor = self.supervisors.get_mut(&name)
             .ok_or_else(|| BloomError::Custom(format!("Service '{}' not found", name)))?;
 
-        // Replace supervisor with a fresh copy for thread move
         let mut supervisor = std::mem::replace(supervisor, Supervisor::new(
             supervisor.service.clone(),
             Arc::clone(&self.console_logger),
@@ -135,7 +132,7 @@ impl ServiceManager {
         ));
 
         let handle = thread::spawn(move || {
-            if let Err(e) = supervisor.supervise_loop(shutdown_flag) {
+            if let Err(e) = supervisor.supervise_loop() {
                 eprintln!("Supervisor for service '{}' exited with error: {:?}", supervisor.service.name, e);
             }
         });
@@ -144,16 +141,19 @@ impl ServiceManager {
         Ok(())
     }
 
-    pub fn supervise_all(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+    pub fn supervise_all(&mut self) -> Result<(), BloomError> {
         for name in self.supervisors.keys().cloned().collect::<Vec<_>>() {
-            self.spawn_supervisor_thread(name, Arc::clone(&shutdown_flag))?;
+            self.spawn_supervisor_thread(name)?;
         }
         Ok(())
     }
 
     /// Shutdown all services and join supervisor threads.
     /// Returns the loggers for reuse after shutdown.
-    pub fn shutdown(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(Arc<Mutex<dyn ConsoleLogger + Send + Sync>>, Arc<Mutex<dyn FileLogger + Send + Sync>>), BloomError> {
+    pub fn shutdown(
+        &mut self,
+        shutdown_flag: Arc<AtomicBool>,
+    ) -> Result<(Arc<Mutex<dyn ConsoleLogger + Send + Sync>>, Arc<Mutex<dyn FileLogger + Send + Sync>>), BloomError> {
         shutdown_flag.store(true, Ordering::SeqCst);
 
         {
@@ -161,7 +161,6 @@ impl ServiceManager {
             file.log(LogLevel::Info, "Shutdown: Flag set. Preparing supervisor list.");
         }
 
-        // Drain supervisors into a list for ShutdownManager
         let supervisor_list: Vec<Arc<Mutex<Supervisor>>> = self.supervisors
             .drain()
             .map(|(_, supervisor)| Arc::new(Mutex::new(supervisor)))
@@ -173,7 +172,6 @@ impl ServiceManager {
             Arc::clone(&self.file_logger),
         );
 
-        // Gracefully shutdown all supervisors within 5 seconds
         shutdown_manager.shutdown_all(Duration::from_secs(5))?;
 
         {
@@ -181,7 +179,6 @@ impl ServiceManager {
             file.log(LogLevel::Info, "Shutdown: Joining all supervisor threads");
         }
 
-        // Join all supervisor threads
         for (name, handle) in self.handles.drain() {
             if let Err(e) = handle.join() {
                 eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
