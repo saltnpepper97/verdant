@@ -85,6 +85,14 @@ impl Supervisor {
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
+        // Skip stopping if tty@ and logged in, assume service exits cleanly on shutdown
+        if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
+            let mut file = self.file_logger.lock().unwrap();
+            file.log(LogLevel::Info, &format!("Skipping stop for logged-in '{}'", self.service.name));
+            self.set_state(ServiceState::Stopped);
+            return Ok(());
+        }
+
         let result = self.stop();
         let mut file = self.file_logger.lock().unwrap();
         match &result {
@@ -178,7 +186,6 @@ impl Supervisor {
         if self.child.is_none() {
             self.start()?;
         }
-
 
         loop {
             let logged_in = self.is_tty_logged_in();
