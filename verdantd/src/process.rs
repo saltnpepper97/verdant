@@ -23,6 +23,7 @@ pub fn start_service(
     service: &ServiceFile,
     file_logger: &mut dyn FileLogger,
 ) -> Result<LaunchResult, BloomError> {
+
     // Prepare stdout/stderr log paths or defaults if not set
     let stdout_log = match &service.stdout_log {
         Some(path) => PathBuf::from(path),
@@ -66,42 +67,56 @@ pub fn start_service(
     cmd.stdout(Stdio::from(stdout_file));
     cmd.stderr(Stdio::from(stderr_file));
 
-    // Resolve UID, GID, umask, nice beforehand for use in pre_exec
-    let uid = service.user.as_ref().and_then(|user| {
-        nix::unistd::User::from_name(user).ok().flatten().map(|u| u.uid)
-    });
-    let gid = service.group.as_ref().and_then(|group| {
-        nix::unistd::Group::from_name(group).ok().flatten().map(|g| g.gid)
-    });
-    let umask_val = service.umask.as_ref().and_then(|s| u32::from_str_radix(s, 8).ok());
-    let nice_val = service.nice;
+    // User and group switching (must be root for this to work)
+    if let Some(user) = &service.user {
+        // Resolve user to uid
+        let uid = nix::unistd::User::from_name(user)
+            .map_err(|e| BloomError::Custom(format!("Failed to lookup user {}: {}", user, e)))?
+            .ok_or_else(|| BloomError::Custom(format!("User {} not found", user)))?
+            .uid;
 
-    // Setup pre_exec for setsid, uid/gid switch, umask, nice
-    unsafe {
-        cmd.pre_exec(move || {
-            // Detach from controlling terminal
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            if let Some(gid) = gid {
-                setgid(Gid::from_raw(gid.as_raw()))?;
-            }
-
-            if let Some(uid) = uid {
+        // Use pre_exec to set UID after fork, before exec
+        unsafe {
+            cmd.pre_exec(move || {
                 setuid(Uid::from_raw(uid.as_raw()))?;
-            }
+                Ok(())
+            });
+        }
+    }
+    if let Some(group) = &service.group {
+        let gid = nix::unistd::Group::from_name(group)
+            .map_err(|e| BloomError::Custom(format!("Failed to lookup group {}: {}", group, e)))?
+            .ok_or_else(|| BloomError::Custom(format!("Group {} not found", group)))?
+            .gid;
 
-            if let Some(val) = umask_val {
-                libc::umask(val);
-            }
+        unsafe {
+            cmd.pre_exec(move || {
+                setgid(Gid::from_raw(gid.as_raw()))?;
+                Ok(())
+            });
+        }
+    }
 
-            if let Some(nice) = nice_val {
-                libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+    // Set umask
+    if let Some(umask_str) = &service.umask {
+        if let Ok(umask_val) = u32::from_str_radix(umask_str, 8) {
+            unsafe {
+                cmd.pre_exec(move || {
+                    libc::umask(umask_val);
+                    Ok(())
+                });
             }
+        }
+    }
 
-            Ok(())
-        });
+    // Set nice priority
+    if let Some(nice_val) = service.nice {
+        unsafe {
+            cmd.pre_exec(move || {
+                libc::setpriority(libc::PRIO_PROCESS, 0, nice_val);
+                Ok(())
+            });
+        }
     }
 
     // Spawn child

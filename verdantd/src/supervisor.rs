@@ -120,7 +120,6 @@ impl Supervisor {
                 }
 
                 let _ = self.shutdown();
-                self.wait_for_exit_with_timeout(Duration::from_secs(5));
                 break;
             }
 
