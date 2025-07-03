@@ -83,7 +83,42 @@ impl Supervisor {
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
+        // Try graceful stop first
         let result = self.stop();
+
+        // Wait a bit, then escalate if needed
+        self.wait_for_exit_with_timeout(Duration::from_secs(3));
+
+        // If still running, escalate to SIGKILL
+        if let Some(child) = &mut self.child {
+            #[cfg(unix)]
+            {
+                use nix::sys::signal::{kill, Signal};
+                use nix::unistd::Pid;
+
+                let pid = child.id() as i32;
+
+                // Check if process still exists before sending SIGKILL
+                if nix::sys::signal::kill(Pid::from_raw(pid), None).is_ok() {
+                    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+
+                    {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(
+                            LogLevel::Warn,
+                            &format!(
+                                "Service '{}' did not stop gracefully, SIGKILL sent",
+                                self.service.name
+                            ),
+                        );
+                    }
+                    // Give kernel a moment to clean up
+                    thread::sleep(Duration::from_millis(200));
+                }
+            }
+            self.child = None;
+            self.state = ServiceState::Stopped;
+        }
 
         {
             let mut file = self.file_logger.lock().unwrap();
@@ -115,12 +150,13 @@ impl Supervisor {
                     let mut file = self.file_logger.lock().unwrap();
                     file.log(
                         LogLevel::Info,
-                        &format!("Shutdown flag detected. Attempting graceful stop of '{}'", self.service.name),
+                        &format!("Shutdown flag detected. Stopping '{}'", self.service.name),
                     );
                 }
 
+                // Shutdown forcibly, no restart during shutdown
                 let _ = self.shutdown();
-                self.wait_for_exit_with_timeout(Duration::from_secs(5));
+
                 break;
             }
 
@@ -144,6 +180,7 @@ impl Supervisor {
                                     thread::sleep(Duration::from_secs(delay));
                                 }
 
+                                // Don't restart if shutdown in progress
                                 if shutdown_flag.load(Ordering::SeqCst) {
                                     let _ = self.shutdown();
                                     return Ok(());

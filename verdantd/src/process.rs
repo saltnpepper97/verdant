@@ -3,7 +3,6 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
-use nix::unistd::Pid;
 
 use nix::unistd::{setgid, setuid, Gid, Uid};
 use nix::libc;
@@ -140,25 +139,19 @@ pub fn stop_service(
     console_logger: &mut dyn ConsoleLogger,
     file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
-    use nix::unistd::Pid;
-    use nix::sys::signal::{kill, Signal};
-    use std::{thread, time::Duration};
-
     let timer = ProcessTimer::start();
-    let pid = Pid::from_raw(child_pid as i32);
 
-    let mut was_custom_stopped = false;
-
+    // If stop-cmd defined, run it, otherwise send SIGTERM
     if let Some(stop_cmd) = &service.stop_cmd {
+        // Run the stop-cmd as shell command with env var MAINPID
         let cmdline = stop_cmd.replace("$MAINPID", &child_pid.to_string());
 
+        // Simple shell spawn
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(&cmdline)
             .status()
             .map_err(|e| BloomError::Custom(format!("Failed to execute stop-cmd: {}", e)))?;
-
-        was_custom_stopped = true;
 
         if !status.success() {
             let msg = format!("stop-cmd '{}' failed with exit {:?}", cmdline, status.code());
@@ -166,47 +159,17 @@ pub fn stop_service(
             file_logger.log(LogLevel::Warn, &msg);
         }
     } else {
-        // Send SIGTERM
-        let _ = kill(pid, Signal::SIGTERM).map_err(|e| {
-            BloomError::Custom(format!("Failed to send SIGTERM to pid {}: {}", pid, e))
-        })?;
+        // Default: send SIGTERM
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child_pid as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .map_err(|e| BloomError::Custom(format!("Failed to send SIGTERM: {}", e)))?;
     }
 
-    // Give the process up to 2 seconds to exit
-    for _ in 0..20 {
-        if !process_exists(pid.as_raw()) {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    // If it's still running, send SIGKILL
-    if process_exists(pid.as_raw()) {
-        let _ = kill(pid, Signal::SIGKILL).map_err(|e| {
-            BloomError::Custom(format!("Failed to send SIGKILL to pid {}: {}", pid, e))
-        })?;
-
-        let msg = format!("Service '{}' did not exit, sent SIGKILL", service.name);
-        console_logger.message(LogLevel::Warn, &msg, timer.elapsed());
-        file_logger.log(LogLevel::Warn, &msg);
-
-        // Optionally wait a bit longer after SIGKILL
-        thread::sleep(Duration::from_millis(300));
-    }
-
-    let msg = format!(
-        "Stopped service '{}' (pid {}), method: {}",
-        service.name,
-        child_pid,
-        if was_custom_stopped { "stop-cmd or SIGTERM" } else { "SIGTERM/SIGKILL" }
-    );
+    let msg = format!("Stopped service '{}', pid {}", service.name, child_pid);
     console_logger.message(LogLevel::Ok, &msg, timer.elapsed());
     file_logger.log(LogLevel::Ok, &msg);
 
     Ok(())
-}
-
-fn process_exists(pid: i32) -> bool {
-    // Sending signal 0 doesn't kill the process but checks if it exists
-    nix::sys::signal::kill(Pid::from_raw(pid), None).is_ok()
 }
