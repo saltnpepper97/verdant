@@ -67,6 +67,7 @@ impl Supervisor {
 
             self.state = ServiceState::Stopping;
             stop_service(&self.service, child.id(), &mut *con, &mut *file)?;
+
             drop(file);
             drop(con);
 
@@ -85,15 +86,13 @@ impl Supervisor {
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
         let result = self.stop();
 
-        {
-            let mut file = self.file_logger.lock().unwrap();
-            let msg = if result.is_ok() {
-                format!("Supervisor shutdown: '{}'", self.service.name)
-            } else {
-                format!("Supervisor shutdown failed: '{}'", self.service.name)
-            };
-            file.log(LogLevel::Info, &msg);
-        }
+        let mut file = self.file_logger.lock().unwrap();
+        let msg = if result.is_ok() {
+            format!("Supervisor shutdown: '{}'", self.service.name)
+        } else {
+            format!("Supervisor shutdown failed: '{}'", self.service.name)
+        };
+        file.log(LogLevel::Info, &msg);
 
         result
     }
@@ -199,16 +198,14 @@ impl Supervisor {
             };
 
             if current_state != last_state {
-                {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(
-                        LogLevel::Info,
-                        &format!(
-                            "Service '{}' state changed: {:?} → {:?}",
-                            self.service.name, last_state, current_state
-                        ),
-                    );
-                }
+                let mut file = self.file_logger.lock().unwrap();
+                file.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Service '{}' state changed: {:?} → {:?}",
+                        self.service.name, last_state, current_state
+                    ),
+                );
                 last_state = current_state;
             }
 
@@ -221,39 +218,52 @@ impl Supervisor {
 
     fn wait_for_exit_with_timeout(&mut self, timeout: Duration) {
         let start = Instant::now();
+
         loop {
             match self.child.as_mut() {
                 Some(child) => match child.try_wait() {
                     Ok(Some(_)) => {
                         self.child = None;
                         self.state = ServiceState::Stopped;
-                        {
-                            let mut file = self.file_logger.lock().unwrap();
-                            file.log(
-                                LogLevel::Info,
-                                &format!("Service '{}' stopped cleanly on shutdown.", self.service.name),
-                            );
-                        }
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(
+                            LogLevel::Info,
+                            &format!("Service '{}' stopped cleanly on shutdown.", self.service.name),
+                        );
                         break;
                     }
                     Ok(None) => {
                         if start.elapsed() > timeout {
-                            {
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(
-                                    LogLevel::Warn,
-                                    &format!(
-                                        "Timeout waiting for service '{}' to stop; sending SIGKILL",
-                                        self.service.name
-                                    ),
-                                );
-                            }
+                            let mut file = self.file_logger.lock().unwrap();
+                            file.log(
+                                LogLevel::Warn,
+                                &format!(
+                                    "Timeout waiting for service '{}' to stop; sending SIGKILL",
+                                    self.service.name
+                                ),
+                            );
+                            drop(file);
+
                             #[cfg(unix)]
                             {
                                 use nix::sys::signal::{kill, Signal};
                                 use nix::unistd::Pid;
                                 let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                             }
+
+                            // 🔧 Skip hanging on tty@ services
+                            if self.service.name.starts_with("tty@") {
+                                let mut file = self.file_logger.lock().unwrap();
+                                file.log(
+                                    LogLevel::Info,
+                                    &format!(
+                                        "TTY service '{}' likely still has an active login; skipping wait",
+                                        self.service.name
+                                    ),
+                                );
+                                break;
+                            }
+
                             thread::sleep(Duration::from_millis(200));
                             break;
                         } else {
@@ -261,16 +271,14 @@ impl Supervisor {
                         }
                     }
                     Err(e) => {
-                        {
-                            let mut file = self.file_logger.lock().unwrap();
-                            file.log(
-                                LogLevel::Fail,
-                                &format!(
-                                    "Error waiting for service '{}': {}",
-                                    self.service.name, e
-                                ),
-                            );
-                        }
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(
+                            LogLevel::Fail,
+                            &format!(
+                                "Error waiting for service '{}': {}",
+                                self.service.name, e
+                            ),
+                        );
                         break;
                     }
                 },

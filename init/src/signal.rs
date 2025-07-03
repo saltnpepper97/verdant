@@ -59,7 +59,6 @@ pub fn install_signal_handlers(
 
                 SIGTERM | SIGINT | SIGPWR => {
                     let msg = match signal {
-                        SIGTERM => "Ignored SIGTERM (external shutdown attempt)",
                         SIGINT => "Ignored SIGINT (Ctrl+C)",
                         SIGPWR => "Ignored SIGPWR (power event)",
                         _ => "Ignored signal",
