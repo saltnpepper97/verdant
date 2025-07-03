@@ -70,10 +70,57 @@ impl Supervisor {
             drop(file);
             drop(con);
 
-            self.child = None;
-            self.state = ServiceState::Stopped;
+            // Wait for child to exit, with timeout
+            for _ in 0..20 { // 2 seconds max, 100ms intervals
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        self.child = None;
+                        self.state = ServiceState::Stopped;
+                        return Ok(());
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(100)),
+                    Err(e) => {
+                        return Err(BloomError::Custom(format!(
+                            "Error while waiting for service '{}': {}",
+                            self.service.name, e
+                        )));
+                    }
+                }
+            }
 
-            Ok(())
+            // If still running, force kill SIGKILL
+            if let Err(e) = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(child.id() as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                return Err(BloomError::Custom(format!(
+                    "Failed to SIGKILL service '{}': {}",
+                    self.service.name, e
+                )));
+            }
+
+            // Wait again after kill
+            for _ in 0..10 {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        self.child = None;
+                        self.state = ServiceState::Stopped;
+                        return Ok(());
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(100)),
+                    Err(e) => {
+                        return Err(BloomError::Custom(format!(
+                            "Error while waiting after kill for service '{}': {}",
+                            self.service.name, e
+                        )));
+                    }
+                }
+            }
+
+            Err(BloomError::Custom(format!(
+                "Service '{}' did not stop in time",
+                self.service.name
+            )))
         } else {
             self.state = ServiceState::Stopped;
             Ok(())
