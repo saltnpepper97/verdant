@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -149,93 +148,31 @@ impl ServiceManager {
         Ok(())
     }
 
-    pub fn shutdown(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-        {
-            let mut file = self.file_logger.lock().unwrap();
-            file.log(LogLevel::Info, "Shutdown: Setting shutdown flag for all supervisors");
+    pub fn shutdown(&mut self) -> Result<(), BloomError> {
+        let mut file = self.file_logger.lock().unwrap();
+
+        if self.supervisors.is_empty() {
+            let msg = "Shutdown: No services to stop";
+            file.log(LogLevel::Warn, msg);
+        } else {
+            for supervisor in self.supervisors.values_mut() {
+                let _ = supervisor.shutdown();
+            }
         }
 
-        // Signal all supervisor loops to exit
-        shutdown_flag.store(true, Ordering::SeqCst);
-
-        // Stop all child services gracefully
-        for supervisor in self.supervisors.values_mut() {
-            if let Err(e) = supervisor.shutdown() {
-                let msg = format!("Error shutting down supervisor '{}': {}", supervisor.service.name, e);
-                if let Ok(mut file) = self.file_logger.lock() {
-                    file.log(LogLevel::Warn, &msg);
+        if self.handles.is_empty() {
+            let msg = "Shutdown: No supervisor threads to join";
+            file.log(LogLevel::Info, msg);
+        } else {
+            for (name, handle) in self.handles.drain() {
+                if let Err(e) = handle.join() {
+                    eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
                 }
             }
         }
 
-        {
-            let mut file = self.file_logger.lock().unwrap();
-            file.log(LogLevel::Info, "Shutdown: Joining all supervisor threads");
-        }
-
-        // Join supervisor threads to ensure clean exit, with timeout per thread
-        let join_timeout = Duration::from_secs(10);
-
-        for (name, handle) in self.handles.drain() {
-            let _start = Instant::now();
-            loop {
-                // There's no direct way to check if JoinHandle finished,
-                // so we attempt to join with try_join (nightly) or just spawn a blocking join in another thread.
-                // Here, we'll do a simple approach with blocking join in a thread with timeout:
-
-                // Spawn a thread to join handle with timeout
-                let join_result = std::thread::spawn(move || handle.join()).join_timeout(join_timeout);
-
-                match join_result {
-                    Ok(join_res) => {
-                        if let Err(e) = join_res {
-                            eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
-                        }
-                        break;
-                    }
-                    Err(_) => {
-                        // Timeout happened, log and continue waiting or break?
-                        let msg = format!("Timeout waiting for supervisor thread '{}' to join after {:?}. Continuing...", name, join_timeout);
-                        if let Ok(mut file) = self.file_logger.lock() {
-                            file.log(LogLevel::Warn, &msg);
-                        }
-                        break; // or continue waiting longer if you want
-                    }
-                }
-            }
-        }
-
-        // Clear all supervisors after shutdown complete
         self.supervisors.clear();
-
-        {
-            let mut file = self.file_logger.lock().unwrap();
-            file.log(LogLevel::Info, "Shutdown: Completed");
-        }
-
         Ok(())
-    }
-}
-
-trait JoinTimeout<T> {
-    fn join_timeout(self, dur: Duration) -> Result<T, ()>;
-}
-
-impl<T: Send + 'static> JoinTimeout<T> for thread::JoinHandle<T> {
-    fn join_timeout(self, dur: Duration) -> Result<T, ()> {
-        use std::sync::mpsc;
-        let (tx, rx) = mpsc::channel();
-
-        std::thread::spawn(move || {
-            let res = self.join();
-            let _ = tx.send(res);
-        });
-
-        match rx.recv_timeout(dur) {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(_panic)) => Err(()), // thread panicked
-            Err(_) => Err(()),          // timeout
-        }
     }
 }
 
