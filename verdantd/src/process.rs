@@ -141,12 +141,42 @@ pub fn stop_service(
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
-    // If stop-cmd defined, run it, otherwise send SIGTERM
+    // Check if TTY is logged in via fuser
+    let mut used_tty = false;
+    if let Some(tty) = service.name.strip_prefix("tty@") {
+        let tty_path = format!("/dev/{}", tty);
+        let output = std::process::Command::new("fuser")
+            .arg(&tty_path)
+            .output();
+
+        if let Ok(out) = output {
+            used_tty = !out.stdout.is_empty();
+        }
+
+        if used_tty {
+            let msg = format!("TTY '{}' is in use; sending SIGKILL to '{}'", tty, service.name);
+            console_logger.message(LogLevel::Warn, &msg, timer.elapsed());
+            file_logger.log(LogLevel::Warn, &msg);
+
+            #[cfg(unix)]
+            {
+                use nix::sys::signal::{kill, Signal};
+                use nix::unistd::Pid;
+                let _ = kill(Pid::from_raw(child_pid as i32), Signal::SIGKILL);
+            }
+
+            let msg = format!("Forcefully killed service '{}', pid {}", service.name, child_pid);
+            console_logger.message(LogLevel::Ok, &msg, timer.elapsed());
+            file_logger.log(LogLevel::Ok, &msg);
+
+            return Ok(());
+        }
+    }
+
+    // Normal stop process
     if let Some(stop_cmd) = &service.stop_cmd {
-        // Run the stop-cmd as shell command with env var MAINPID
         let cmdline = stop_cmd.replace("$MAINPID", &child_pid.to_string());
 
-        // Simple shell spawn
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(&cmdline)
@@ -159,7 +189,6 @@ pub fn stop_service(
             file_logger.log(LogLevel::Warn, &msg);
         }
     } else {
-        // Default: send SIGTERM
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(child_pid as i32),
             nix::sys::signal::Signal::SIGTERM,
@@ -173,3 +202,4 @@ pub fn stop_service(
 
     Ok(())
 }
+
