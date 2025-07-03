@@ -1,6 +1,7 @@
 use std::fs::{metadata, OpenOptions};
 use std::io::Write;
 use std::time::{Duration, Instant};
+use std::path::Path;
 
 use regex::Regex;
 use terminal_size::{Width, terminal_size};
@@ -164,6 +165,11 @@ impl FileLogger for FileLoggerImpl {
     fn initialize(&mut self, console_logger: &mut dyn ConsoleLogger) -> Result<(), BloomError> {
         if self.has_initialized {
             return Ok(());
+        }
+
+        // Ensure parent directory exists
+        if let Some(parent) = Path::new(&self.file_path).parent() {
+            std::fs::create_dir_all(parent).map_err(BloomError::Io)?;
         }
 
         self.maybe_write_session_header()?;
