@@ -184,6 +184,7 @@ impl Supervisor {
             let logged_in = self.is_tty_logged_in();
 
             if self.service.name.starts_with("tty@") && logged_in {
+                self.set_state(ServiceState::Stopped);
 
                 if shutdown_flag.load(Ordering::SeqCst) {
                     break;
