@@ -85,12 +85,11 @@ impl Supervisor {
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        // Skip stopping if tty@ and logged in, assume service exits cleanly on shutdown
         if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
             {
                 let mut file = self.file_logger.lock().unwrap();
                 file.log(LogLevel::Info, &format!("Skipping stop for logged-in '{}'", self.service.name));
-            } 
+            }
             self.set_state(ServiceState::Stopped);
             return Ok(());
         }
@@ -155,7 +154,7 @@ impl Supervisor {
 
         for entry in proc_dir_iter.flatten() {
             let file_name = entry.file_name();
-            let file_name_owned = file_name.to_string_lossy().to_string(); // fix for E0716
+            let file_name_owned = file_name.to_string_lossy().to_string();
             let pid: u32 = match file_name_owned.parse() {
                 Ok(n) => n,
                 Err(_) => continue,
@@ -193,31 +192,41 @@ impl Supervisor {
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
+
             match self.child_has_exited() {
                 Some(true) => {
                     if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
                         break;
                     }
 
-            if self.service.name.starts_with("tty@") {
-                if self.is_tty_logged_in() {
-                    break;
-                } else {
-                    if !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                    if self.service.name.starts_with("tty@") {
+                        if self.is_tty_logged_in() {
+                            thread::sleep(Duration::from_secs(1));
+                            continue;
+                        }
+
+                        if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                            thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
+                            let _ = self.start();
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                        thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
+                        let _ = self.start();
+                        continue;
+                    } else {
                         break;
                     }
                 }
-            } else {
-                if  !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
-                    break;
-                }
-            }
 
-
-                }
                 Some(false) => {
                     self.set_state(ServiceState::Running);
                 }
+
                 None => {
                     if shutdown_flag.load(Ordering::SeqCst) {
                         break;
@@ -226,6 +235,7 @@ impl Supervisor {
                     if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
                         thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
                         let _ = self.start();
+                        continue;
                     } else {
                         break;
                     }
@@ -233,7 +243,6 @@ impl Supervisor {
             }
 
             thread::sleep(Duration::from_millis(300));
-            let _ = self.start();
         }
 
         self.shutdown()?;
