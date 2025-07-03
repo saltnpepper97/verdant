@@ -148,24 +148,31 @@ impl ServiceManager {
         Ok(())
     }
 
-pub fn shutdown(&mut self) -> Result<(), BloomError> {
-    // Step 1: Stop all services (holding self.supervisors lock)
-    if self.supervisors.is_empty() {
-        let mut file = self.file_logger.lock().unwrap();
-        file.log(LogLevel::Warn, "Shutdown: No services to stop");
-    } else {
-        for supervisor in self.supervisors.values_mut() {
-            if let Err(e) = supervisor.shutdown() {
-                let mut file = self.file_logger.lock().unwrap();
-                file.log(LogLevel::Fail, &format!("Failed to shutdown service '{}': {}", supervisor.service.name, e));
+    pub fn shutdown(&mut self) -> Result<(), BloomError> {
+        if self.supervisors.is_empty() {
+            let mut file = self.file_logger.lock().unwrap();
+            file.log(LogLevel::Warn, "Shutdown: No services to stop");
+        } else {
+            for supervisor in self.supervisors.values_mut() {
+                if let Err(e) = supervisor.shutdown() {
+                    let mut file = self.file_logger.lock().unwrap();
+                    file.log(LogLevel::Fail, &format!("Failed to shutdown service '{}': {}", supervisor.service.name, e));
+                }
             }
         }
+
+        // Join supervisor threads here
+        for (name, handle) in self.take_handles() {
+            if let Err(e) = handle.join() {
+                let mut file = self.file_logger.lock().unwrap();
+                file.log(LogLevel::Fail, &format!("Failed to join thread for '{}': {:?}", name, e));
+            }
+        }
+
+        Ok(())
     }
 
-    Ok(())
-}
-    pub fn take_handles(&mut self) -> std::collections::HashMap<String, std::thread::JoinHandle<()>> {
+    pub fn take_handles(&mut self) -> HashMap<String, JoinHandle<()>> {
         std::mem::take(&mut self.handles)
     }
 }
-

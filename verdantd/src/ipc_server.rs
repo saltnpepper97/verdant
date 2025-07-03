@@ -136,49 +136,34 @@ fn handle_client(
             thread::spawn(move || {
                 shutdown_flag_clone.store(true, Ordering::SeqCst);
 
-                // Step 3: Call shutdown(), extract join handles *under lock*
-                let handles = {
-                    let mut sm_guard = match sm.lock() {
-                        Ok(sm) => sm,
-                        Err(_) => return,
-                    };
-
-                    let console_logger = sm_guard.get_console_logger();
-                    let file_logger = sm_guard.get_file_logger();
-
-                    // Call shutdown (stops services but does NOT join threads)
-                    let shutdown_result = sm_guard.shutdown();
-
-                    // Log shutdown result
-                    match &shutdown_result {
-                        Ok(_) => {
-                            if let Ok(mut file) = file_logger.lock() {
-                                file.log(LogLevel::Info, "All services stopped");
-                            }
-                        }
-                        Err(e) => {
-                            let msg = format!("Failed to shutdown services: {}", e);
-                            if let Ok(mut con) = console_logger.lock() {
-                                con.message(LogLevel::Fail, &msg, Duration::ZERO);
-                            }
-                            if let Ok(mut file) = file_logger.lock() {
-                                file.log(LogLevel::Fail, &msg);
-                            }
-                        }
-                    }
-
-                    // Extract handles for joining AFTER dropping lock
-                    sm_guard.take_handles()
+                let mut sm_guard = match sm.lock() {
+                    Ok(sm) => sm,
+                    Err(_) => return,
                 };
 
-                // Step 4: Join supervisor threads (lock is dropped here)
-                for (name, handle) in handles {
-                    if let Err(e) = handle.join() {
-                        eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
+                let console_logger = sm_guard.get_console_logger();
+                let file_logger = sm_guard.get_file_logger();
+
+                let shutdown_result = sm_guard.shutdown();
+
+                match &shutdown_result {
+                    Ok(_) => {
+                        if let Ok(mut file) = file_logger.lock() {
+                            file.log(LogLevel::Info, "All services stopped");
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to shutdown services: {}", e);
+                        if let Ok(mut con) = console_logger.lock() {
+                            con.message(LogLevel::Fail, &msg, Duration::ZERO);
+                        }
+                        if let Ok(mut file) = file_logger.lock() {
+                            file.log(LogLevel::Fail, &msg);
+                        }
                     }
                 }
 
-                // Step 5: Send shutdown/reboot command to init
+                // Step 3: Send shutdown/reboot command to init
                 let init_request = IpcRequest {
                     target: IpcTarget::Init,
                     command: cmd,

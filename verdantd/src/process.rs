@@ -6,6 +6,8 @@ use std::time::Instant;
 
 use nix::unistd::{setgid, setuid, Gid, Uid};
 use nix::libc;
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -23,33 +25,23 @@ pub fn start_service(
     service: &ServiceFile,
     file_logger: &mut dyn FileLogger,
 ) -> Result<LaunchResult, BloomError> {
+    let stdout_log = service.stdout_log.clone().map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/var/log/verdant/services/{}.out.log", service.name)));
+    let stderr_log = service.stderr_log.clone().map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/var/log/verdant/services/{}.err.log", service.name)));
 
-    // Prepare stdout/stderr log paths or defaults if not set
-    let stdout_log = match &service.stdout_log {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from(format!("/var/log/verdant/services/{}.out.log", service.name)),
-    };
-    let stderr_log = match &service.stderr_log {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from(format!("/var/log/verdant/services/{}.err.log", service.name)),
-    };
-
-    // Ensure log directory exists
     if let Some(parent) = stdout_log.parent() {
         fs::create_dir_all(parent).map_err(BloomError::Io)?;
     }
 
-    // Open log files
     let stdout_file = File::create(&stdout_log).map_err(BloomError::Io)?;
     let stderr_file = File::create(&stderr_log).map_err(BloomError::Io)?;
 
-    // Prepare command
     let mut cmd = Command::new(&service.cmd);
     if let Some(args) = &service.args {
         cmd.args(args);
     }
 
-    // Setup env vars
     if let Some(envs) = &service.env {
         for env_var in envs {
             if let Some((k, v)) = env_var.split_once('=') {
@@ -58,74 +50,48 @@ pub fn start_service(
         }
     }
 
-    // Working directory
     if let Some(dir) = &service.working_dir {
         cmd.current_dir(dir);
     }
 
-    // Redirect stdout/stderr
     cmd.stdout(Stdio::from(stdout_file));
     cmd.stderr(Stdio::from(stderr_file));
 
-    // User and group switching (must be root for this to work)
-    if let Some(user) = &service.user {
-        // Resolve user to uid
-        let uid = nix::unistd::User::from_name(user)
-            .map_err(|e| BloomError::Custom(format!("Failed to lookup user {}: {}", user, e)))?
-            .ok_or_else(|| BloomError::Custom(format!("User {} not found", user)))?
-            .uid;
+    // Pre-exec UID/GID/nice
+    let user_uid = service.user.as_ref().and_then(|user| {
+        nix::unistd::User::from_name(user).ok().flatten().map(|u| u.uid)
+    });
 
-        // Use pre_exec to set UID after fork, before exec
-        unsafe {
-            cmd.pre_exec(move || {
-                setuid(Uid::from_raw(uid.as_raw()))?;
-                Ok(())
-            });
-        }
-    }
-    if let Some(group) = &service.group {
-        let gid = nix::unistd::Group::from_name(group)
-            .map_err(|e| BloomError::Custom(format!("Failed to lookup group {}: {}", group, e)))?
-            .ok_or_else(|| BloomError::Custom(format!("Group {} not found", group)))?
-            .gid;
+    let group_gid = service.group.as_ref().and_then(|group| {
+        nix::unistd::Group::from_name(group).ok().flatten().map(|g| g.gid)
+    });
 
-        unsafe {
-            cmd.pre_exec(move || {
+    let nice_val = service.nice;
+
+    let umask_val = service.umask.as_ref().and_then(|s| u32::from_str_radix(s, 8).ok());
+
+    unsafe {
+        cmd.pre_exec(move || {
+            if let Some(gid) = group_gid {
                 setgid(Gid::from_raw(gid.as_raw()))?;
-                Ok(())
-            });
-        }
-    }
-
-    // Set umask
-    if let Some(umask_str) = &service.umask {
-        if let Ok(umask_val) = u32::from_str_radix(umask_str, 8) {
-            unsafe {
-                cmd.pre_exec(move || {
-                    libc::umask(umask_val);
-                    Ok(())
-                });
             }
-        }
+            if let Some(uid) = user_uid {
+                setuid(Uid::from_raw(uid.as_raw()))?;
+            }
+            if let Some(umask) = umask_val {
+                libc::umask(umask);
+            }
+            if let Some(nice) = nice_val {
+                libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+            }
+            Ok(())
+        });
     }
 
-    // Set nice priority
-    if let Some(nice_val) = service.nice {
-        unsafe {
-            cmd.pre_exec(move || {
-                libc::setpriority(libc::PRIO_PROCESS, 0, nice_val);
-                Ok(())
-            });
-        }
-    }
+    let child = cmd.spawn()
+        .map_err(|e| BloomError::Custom(format!("Failed to spawn service {}: {}", service.name, e)))?;
 
-    // Spawn child
-    let child = cmd.spawn().map_err(|e| {
-        BloomError::Custom(format!("Failed to spawn service {}: {}", service.name, e))
-    })?;
-
-    let msg = format!("Launched service '{}', pid {}", service.name, child.id());
-    file_logger.log(LogLevel::Ok, &msg);
+    file_logger.log(LogLevel::Ok, &format!("Launched service '{}', pid {}", service.name, child.id()));
 
     Ok(LaunchResult {
         child,
@@ -140,36 +106,28 @@ pub fn stop_service(
     file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
+    let pid = Pid::from_raw(child_pid as i32);
 
-    // If stop-cmd defined, run it, otherwise send SIGTERM
     if let Some(stop_cmd) = &service.stop_cmd {
-        // Run the stop-cmd as shell command with env var MAINPID
         let cmdline = stop_cmd.replace("$MAINPID", &child_pid.to_string());
-
-        // Simple shell spawn
-        let status = std::process::Command::new("/bin/sh")
+        let status = Command::new("/bin/sh")
             .arg("-c")
             .arg(&cmdline)
             .status()
-            .map_err(|e| BloomError::Custom(format!("Failed to execute stop-cmd: {}", e)))?;
+            .map_err(|e| BloomError::Custom(format!("Failed to run stop-cmd: {}", e)))?;
 
         if !status.success() {
-            let msg = format!("stop-cmd '{}' failed with exit {:?}", cmdline, status.code());
+            let msg = format!("stop-cmd failed: '{}', status: {:?}", cmdline, status.code());
             console_logger.message(LogLevel::Warn, &msg, timer.elapsed());
             file_logger.log(LogLevel::Warn, &msg);
         }
     } else {
-        // Default: send SIGTERM
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(child_pid as i32),
-            nix::sys::signal::Signal::SIGTERM,
-        )
-        .map_err(|e| BloomError::Custom(format!("Failed to send SIGTERM: {}", e)))?;
+        kill(pid, Signal::SIGTERM)
+            .map_err(|e| BloomError::Custom(format!("Failed to send SIGTERM to pid {}: {}", child_pid, e)))?;
     }
 
-    let msg = format!("Stopped service '{}', pid {}", service.name, child_pid);
-    console_logger.message(LogLevel::Ok, &msg, timer.elapsed());
-    file_logger.log(LogLevel::Ok, &msg);
-
+    console_logger.message(LogLevel::Ok, &format!("Sent stop signal to '{}'", service.name), timer.elapsed());
+    file_logger.log(LogLevel::Ok, &format!("Stopped '{}', pid {}", service.name, child_pid));
     Ok(())
 }
+
