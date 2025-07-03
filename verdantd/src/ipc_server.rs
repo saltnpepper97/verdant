@@ -134,23 +134,15 @@ fn handle_client(
                 // Step 3: Set shutdown flag BEFORE shutting down services
                 shutdown_flag_clone.store(true, Ordering::SeqCst);
 
-                let mut sm_guard = match sm.lock() {
+                // NOTE: Do NOT call sm_guard.shutdown() here!
+                // The main thread watches the shutdown_flag and will call shutdown() once.
+
+                let sm_guard = match sm.lock() {
                     Ok(sm) => sm,
                     Err(_) => return,
                 };
 
-                // Step 4: Shutdown all services (supervisors observe shutdown flag and exit)
-                if let Err(e) = sm_guard.shutdown(Arc::clone(&shutdown_flag_clone)) {
-                    let msg = format!("Failed to shutdown services: {}", e);
-                    if let Ok(mut con) = sm_guard.get_console_logger().lock() {
-                        con.message(LogLevel::Fail, &msg, std::time::Duration::ZERO);
-                    }
-                    if let Ok(mut file) = sm_guard.get_file_logger().lock() {
-                        file.log(LogLevel::Fail, &msg);
-                    }
-                }
-
-                // Step 5: Send shutdown/reboot command to init
+                // Step 4: Send shutdown/reboot command to init
                 let init_request = IpcRequest {
                     target: IpcTarget::Init,
                     command: request.command.clone(),

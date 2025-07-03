@@ -92,6 +92,5 @@ impl ShutdownManager {
 
         Ok(())
     }
-
 }
 
