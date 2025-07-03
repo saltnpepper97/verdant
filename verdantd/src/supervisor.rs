@@ -26,6 +26,12 @@ pub struct Supervisor {
     restarting: bool,
 }
 
+enum ChildExitStatus {
+    StillRunning,
+    ExitedSuccess,
+    ExitedFailure,
+}
+
 impl Supervisor {
     pub fn new(
         service: ServiceFile,
@@ -85,12 +91,12 @@ impl Supervisor {
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        // Skip stopping if tty@ and logged in, assume service exits cleanly on shutdown
         if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
             {
                 let mut file = self.file_logger.lock().unwrap();
                 file.log(LogLevel::Info, &format!("Skipping stop for logged-in '{}'", self.service.name));
-            } 
+            }
+
             self.set_state(ServiceState::Stopped);
             return Ok(());
         }
@@ -112,28 +118,28 @@ impl Supervisor {
         }
     }
 
-    fn child_has_exited(&mut self) -> Option<bool> {
+    fn check_child_status(&mut self) -> ChildExitStatus {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     self.child = None;
                     if status.success() {
                         self.set_state(ServiceState::Stopped);
-                        Some(true)
+                        ChildExitStatus::ExitedSuccess
                     } else {
                         self.set_state(ServiceState::Failed);
-                        Some(false)
+                        ChildExitStatus::ExitedFailure
                     }
                 }
-                Ok(None) => Some(false),
+                Ok(None) => ChildExitStatus::StillRunning,
                 Err(_) => {
                     self.child = None;
                     self.set_state(ServiceState::Failed);
-                    Some(false)
+                    ChildExitStatus::ExitedFailure
                 }
             }
         } else {
-            Some(true)
+            ChildExitStatus::ExitedSuccess
         }
     }
 
@@ -155,7 +161,7 @@ impl Supervisor {
 
         for entry in proc_dir_iter.flatten() {
             let file_name = entry.file_name();
-            let file_name_owned = file_name.to_string_lossy().to_string(); // fix for E0716
+            let file_name_owned = file_name.to_string_lossy().to_string();
             let pid: u32 = match file_name_owned.parse() {
                 Ok(n) => n,
                 Err(_) => continue,
@@ -193,28 +199,20 @@ impl Supervisor {
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
-//            let logged_in = self.is_tty_logged_in();
 
-//            if self.service.name.starts_with("tty@") && logged_in {
-//                self.set_state(ServiceState::Stopped);
-//                thread::sleep(Duration::from_secs(1));
-//                continue;
-//            }
-
-            match self.child_has_exited() {
-                Some(true) => {
-                    if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
-                        break;
-                    }
-                }
-                Some(false) => {
+            match self.check_child_status() {
+                ChildExitStatus::StillRunning => {
                     self.set_state(ServiceState::Running);
                 }
-                None => {
-                    if shutdown_flag.load(Ordering::SeqCst) {
+                ChildExitStatus::ExitedSuccess => {
+                    if self.service.restart == RestartPolicy::Always {
+                        thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
+                        let _ = self.start();
+                    } else {
                         break;
                     }
-
+                }
+                ChildExitStatus::ExitedFailure => {
                     if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
                         thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
                         let _ = self.start();
