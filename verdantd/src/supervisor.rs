@@ -233,6 +233,7 @@ impl Supervisor {
             }
 
             thread::sleep(Duration::from_millis(300));
+            let _ = self.start();
         }
 
         self.shutdown()?;
