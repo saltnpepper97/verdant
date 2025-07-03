@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Main thread watches shutdown flag
     while !shutdown_flag.load(Ordering::SeqCst) {
-        thread::sleep(std::time::Duration::from_secs(1));
+        thread::sleep(std::time::Duration::from_millis(500));
     }
     
     // Use console logger to emit clean shutdown log

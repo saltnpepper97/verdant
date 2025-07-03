@@ -131,6 +131,18 @@ impl Supervisor {
                         match self.service.restart {
                             RestartPolicy::Always => {
                                 self.restart_count += 1;
+
+                                {
+                                    let mut file = self.file_logger.lock().unwrap();
+                                    file.log(
+                                        LogLevel::Info,
+                                        &format!(
+                                            "Restarting service '{}' (attempt #{})",
+                                            self.service.name, self.restart_count
+                                        ),
+                                    );
+                                }
+
                                 if let Some(delay) = self.service.restart_delay {
                                     thread::sleep(Duration::from_secs(delay));
                                 }
@@ -150,6 +162,18 @@ impl Supervisor {
                             RestartPolicy::OnFailure => {
                                 if !status.success() {
                                     self.restart_count += 1;
+
+                                    {
+                                        let mut file = self.file_logger.lock().unwrap();
+                                        file.log(
+                                            LogLevel::Info,
+                                            &format!(
+                                                "Restarting service '{}' (attempt #{}) due to failure",
+                                                self.service.name, self.restart_count
+                                            ),
+                                        );
+                                    }
+
                                     if let Some(delay) = self.service.restart_delay {
                                         thread::sleep(Duration::from_secs(delay));
                                     }
@@ -176,16 +200,14 @@ impl Supervisor {
                             }
                         }
                     }
-                    Ok(None) => {
-                        match self.state {
-                            ServiceState::Starting => {
-                                self.state = ServiceState::Running;
-                                ServiceState::Running
-                            }
-                            ServiceState::Running => ServiceState::Running,
-                            other => other, // Avoid jump from Stopped → Running
+                    Ok(None) => match self.state {
+                        ServiceState::Starting => {
+                            self.state = ServiceState::Running;
+                            ServiceState::Running
                         }
-                    }
+                        ServiceState::Running => ServiceState::Running,
+                        other => other,
+                    },
                     Err(e) => {
                         self.state = ServiceState::Failed;
                         return Err(BloomError::Custom(format!(
@@ -197,16 +219,14 @@ impl Supervisor {
             };
 
             if current_state != last_state {
-                {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(
-                        LogLevel::Info,
-                        &format!(
-                            "Service '{}' state changed: {:?} → {:?}",
-                            self.service.name, last_state, current_state
-                        ),
-                    );
-                }
+                let mut file = self.file_logger.lock().unwrap();
+                file.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Service '{}' state changed: {:?} → {:?}",
+                        self.service.name, last_state, current_state
+                    ),
+                );
                 last_state = current_state;
             }
 
