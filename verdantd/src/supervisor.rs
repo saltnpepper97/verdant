@@ -75,27 +75,24 @@ impl Supervisor {
 
             Ok(())
         } else {
-            Err(BloomError::Custom(format!(
-                "Service '{}' not running",
-                self.service.name
-            )))
+            self.state = ServiceState::Stopped;
+            Ok(())
         }
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        let result = self.stop();
-
-        {
-            let mut file = self.file_logger.lock().unwrap();
-            let msg = if result.is_ok() {
-                format!("Supervisor shutdown: '{}'", self.service.name)
-            } else {
-                format!("Supervisor shutdown failed: '{}'", self.service.name)
-            };
-            file.log(LogLevel::Info, &msg);
+        match self.stop() {
+            Ok(()) => {
+                let mut file = self.file_logger.lock().unwrap();
+                file.log(LogLevel::Info, &format!("Supervisor shutdown: '{}'", self.service.name));
+                Ok(())
+            }
+            Err(e) => {
+                let mut file = self.file_logger.lock().unwrap();
+                file.log(LogLevel::Fail, &format!("Supervisor shutdown error: '{}': {}", self.service.name, e));
+                Err(e)
+            }
         }
-
-        result
     }
 
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
@@ -111,14 +108,6 @@ impl Supervisor {
 
         loop {
             if shutdown_flag.load(Ordering::SeqCst) {
-                {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(
-                        LogLevel::Info,
-                        &format!("Shutdown flag detected. Attempting graceful stop of '{}'", self.service.name),
-                    );
-                }
-
                 break;
             }
 
