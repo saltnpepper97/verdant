@@ -44,6 +44,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Shutdown flag shared by all threads
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
+    // Channel to notify IPC thread that shutdown is complete
+    let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel::<()>();
+    let shutdown_complete_tx = Arc::new(Mutex::new(Some(shutdown_complete_tx)));
+    let shutdown_complete_rx = Arc::new(Mutex::new(shutdown_complete_rx));
+
     // Load services from disk, add to manager
     {
         let mut con = console_logger.lock().unwrap();
@@ -63,14 +68,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mgr.supervise_all(Arc::clone(&shutdown_flag))?;
     }
 
-    // Spawn IPC server thread
+    // Spawn IPC server thread, passing the shutdown_complete_tx and rx
     let ipc_manager = Arc::clone(&manager);
     let ipc_shutdown_flag = Arc::clone(&shutdown_flag);
+    let ipc_shutdown_complete_tx = Arc::clone(&shutdown_complete_tx);
+    let ipc_shutdown_complete_rx = Arc::clone(&shutdown_complete_rx);
 
     let (ipc_ready_tx, ipc_ready_rx) = mpsc::channel();
 
     thread::spawn(move || {
-        if let Err(e) = ipc_server::run_ipc_server(ipc_manager, ipc_shutdown_flag, Some(ipc_ready_tx)) {
+        if let Err(e) = ipc_server::run_ipc_server(
+            ipc_manager,
+            ipc_shutdown_flag,
+            Some(ipc_ready_tx),
+            Some(ipc_shutdown_complete_tx),
+            ipc_shutdown_complete_rx,
+        ) {
             eprintln!("IPC server error: {}", e);
         }
     });
@@ -89,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread::sleep(std::time::Duration::from_secs(1));
     }
 
-    // Now that shutdown flag is set, perform graceful shutdown once here
+    // Shutdown logging
     {
         let mut file = file_logger.lock().unwrap();
         file.log(LogLevel::Info, "verdantd exiting cleanly.");
@@ -98,6 +111,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut mgr = manager.lock().unwrap();
         mgr.shutdown(Arc::clone(&shutdown_flag))?;
+    }
+
+    // Notify IPC thread that shutdown is complete
+    if let Some(tx) = shutdown_complete_tx.lock().unwrap().take() {
+        let _ = tx.send(()); // Ignore errors if receiver disconnected
     }
 
     // Cleanup IPC socket file
