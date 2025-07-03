@@ -1,12 +1,13 @@
 name: tty@{id}
-desc: Login prompt using getty on /dev/{id}
+desc: Login prompt using getty on /dev/{}
 
 cmd: /sbin/getty
-args: -L 115200 /dev/{id} linux
+args: -L 115200 /dev/{} linux
 
 restart: always
 
-tags: tty
+tags:
+    - tty
 
 instances:
     - tty1

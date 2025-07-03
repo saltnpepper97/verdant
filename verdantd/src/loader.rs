@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -13,7 +12,6 @@ use crate::ordering::order_services;
 const SERVICE_DIR: &str = "/etc/verdant/services";
 
 pub fn load_services(
-    _vars: &HashMap<String, String>,
     console_logger: &mut dyn ConsoleLogger,
     file_logger: &mut dyn FileLogger,
 ) -> Result<Vec<ServiceFile>, BloomError> {
@@ -35,20 +33,15 @@ pub fn load_services(
         let path = entry.path();
 
         if path.is_file() && path.extension().map(|s| s == "vs").unwrap_or(false) {
-            // Parse base service file once with empty vars to get instances list
-            match parse_service_file(&path, &HashMap::new(), console_logger, file_logger) {
+            // Initial parse with no instance substitution to detect instances
+            match parse_service_file(&path, None, console_logger, file_logger) {
                 Ok(service) => {
                     if let Some(instances) = &service.instances {
-                        for id_raw in instances {
-                            let id = id_raw.trim();
+                        for instance in instances {
+                            let id = instance.trim();
 
-                            let mut vars = HashMap::new();
-                            vars.insert("id".to_string(), id.to_string());
-
-                            // Parse the service file again for each instance with vars applied
-                            match parse_service_file(&path, &vars, console_logger, file_logger) {
+                            match parse_service_file(&path, Some(id), console_logger, file_logger) {
                                 Ok(inst) => {
-                                    // The name is already substituted, so just push as is
                                     services.push(inst);
                                     parsed_count += 1;
                                 }
@@ -63,6 +56,7 @@ pub fn load_services(
                             }
                         }
                     } else {
+                        // No instances: use the original service definition as-is
                         services.push(service);
                         parsed_count += 1;
                     }
@@ -76,7 +70,6 @@ pub fn load_services(
         }
     }
 
-    // Apply strict load ordering (by dependencies and priority)
     let ordered_services = order_services(services)?;
 
     let summary_msg = format!("Parsed {} service file(s)", parsed_count);

@@ -7,7 +7,6 @@ mod process;
 mod service_file;
 mod supervisor;
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -45,8 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut con = console_logger.lock().unwrap();
         let mut file = file_logger.lock().unwrap();
 
-        let vars = HashMap::new();
-        let services = load_services(&vars, &mut *con, &mut *file)?;
+        let services = load_services(&mut *con, &mut *file)?;
 
         let mut mgr = manager.lock().unwrap();
         for service in services {
