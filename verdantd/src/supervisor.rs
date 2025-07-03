@@ -193,23 +193,23 @@ impl Supervisor {
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
-            let logged_in = self.is_tty_logged_in();
 
-            if self.service.name.starts_with("tty@") && logged_in {
-                self.set_state(ServiceState::Stopped);
-
-                if shutdown_flag.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
+            let is_tty = self.service.name.starts_with("tty@");
+            let logged_in = is_tty && self.is_tty_logged_in();
 
             match self.child_has_exited() {
                 Some(true) => {
                     if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
                         break;
+                    }
+
+                    if !logged_in && matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                        thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
+                        let _ = self.start();
+                    } else if logged_in {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(LogLevel::Info, &format!("TTY '{}' still in use — delaying restart", self.service.name));
+                        thread::sleep(Duration::from_secs(1));
                     }
                 }
                 Some(false) => {
@@ -220,11 +220,13 @@ impl Supervisor {
                         break;
                     }
 
-                    if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                    if !logged_in && matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
                         thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
                         let _ = self.start();
-                    } else {
-                        break;
+                    } else if logged_in {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(LogLevel::Info, &format!("TTY '{}' still in use — delaying restart", self.service.name));
+                        thread::sleep(Duration::from_secs(1));
                     }
                 }
             }
