@@ -148,59 +148,38 @@ impl ServiceManager {
         Ok(())
     }
 
-    pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        // Shutdown services while holding the lock, collect results
-        let shutdown_results = {
-            if self.supervisors.is_empty() {
-                None
-            } else {
-                let mut results = Vec::with_capacity(self.supervisors.len());
-                for supervisor in self.supervisors.values_mut() {
-                    results.push(supervisor.shutdown());
-                }
-                Some(results)
-            }
-        };
-
-        // Join supervisor threads after dropping any locks
-        let join_results = {
-            if self.handles.is_empty() {
-                None
-            } else {
-                let mut results = Vec::with_capacity(self.handles.len());
-                for (name, handle) in self.handles.drain() {
-                    let res = handle.join();
-                    if let Err(e) = &res {
-                        eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
-                    }
-                    results.push(res);
-                }
-                Some(results)
-            }
-        };
-
-        // Clear supervisors after shutdown and joining
-        self.supervisors.clear();
-
-        // Logging after locks dropped
+pub fn shutdown(&mut self) -> Result<(), BloomError> {
+    // Step 1: Stop all services (holding self.supervisors lock)
+    if self.supervisors.is_empty() {
         let mut file = self.file_logger.lock().unwrap();
-
-        if let Some(results) = shutdown_results {
-            for res in results {
-                if let Err(e) = res {
-                    let msg = format!("Failed to shutdown a service: {:?}", e);
-                    file.log(LogLevel::Fail, &msg);
-                }
+        file.log(LogLevel::Warn, "Shutdown: No services to stop");
+    } else {
+        for supervisor in self.supervisors.values_mut() {
+            if let Err(e) = supervisor.shutdown() {
+                let mut file = self.file_logger.lock().unwrap();
+                file.log(LogLevel::Fail, &format!("Failed to shutdown service '{}': {}", supervisor.service.name, e));
             }
-        } else {
-            file.log(LogLevel::Warn, "Shutdown: No services to stop");
         }
-
-        if join_results.is_none() {
-            file.log(LogLevel::Info, "Shutdown: No supervisor threads to join");
-        }
-
-        Ok(())
     }
+
+    // Step 2: Drop locks before joining threads!
+    // Join all supervisor threads
+    if self.handles.is_empty() {
+        let mut file = self.file_logger.lock().unwrap();
+        file.log(LogLevel::Info, "Shutdown: No supervisor threads to join");
+    } else {
+        for (name, handle) in self.handles.drain() {
+            if let Err(e) = handle.join() {
+                eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
+            }
+        }
+    }
+
+    // Step 3: Clear supervisors after shutdown and joining threads
+    self.supervisors.clear();
+
+    Ok(())
+}
+
 }
 
