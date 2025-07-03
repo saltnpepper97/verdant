@@ -45,10 +45,12 @@ impl Supervisor {
         }
 
         self.state = ServiceState::Starting;
-        let mut file = self.file_logger.lock().unwrap();
-        let launch = start_service(&self.service, &mut *file)?;
-        self.child = Some(launch.child);
-        self.last_start = Some(launch.start_time);
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            let launch = start_service(&self.service, &mut *file)?;
+            self.child = Some(launch.child);
+            self.last_start = Some(launch.start_time);
+        }
         self.restart_count = 0;
         Ok(())
     }
@@ -95,12 +97,32 @@ impl Supervisor {
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
         let result = self.stop();
-        let mut file = self.file_logger.lock().unwrap();
-        match &result {
-            Ok(_) => file.log(LogLevel::Info, &format!("Supervisor shutdown: '{}'", self.service.name)),
-            Err(e) => file.log(LogLevel::Fail, &format!("Shutdown failed for '{}': {}", self.service.name, e)),
+        {
+            let mut file = self.file_logger.lock().unwrap();
+            match &result {
+                Ok(_) => file.log(LogLevel::Info, &format!("Supervisor shutdown: '{}'", self.service.name)),
+                Err(e) => file.log(LogLevel::Fail, &format!("Shutdown failed for '{}': {}", self.service.name, e)),
+            }
         }
         result
+    }
+
+    fn child_has_exited(&mut self) -> bool {
+        if let Some(child) = self.child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    self.child = None;
+                    self.state = ServiceState::Stopped;
+                    return true;
+                }
+                Ok(None) => return false,
+                Err(_) => {
+                    self.state = ServiceState::Failed;
+                    return true;
+                }
+            }
+        }
+        true
     }
 
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
@@ -109,37 +131,25 @@ impl Supervisor {
         }
 
         while !shutdown_flag.load(Ordering::SeqCst) {
-            match self.child.as_mut() {
-                Some(child) => match child.try_wait() {
-                    Ok(Some(status)) => {
-                        {
-                            let mut file = self.file_logger.lock().unwrap();
-                            file.log(LogLevel::Warn, &format!("'{}' exited with {:?}", self.service.name, status));
-                        }
+            if self.child_has_exited() {
+                {
+                    let mut file = self.file_logger.lock().unwrap();
+                    file.log(LogLevel::Warn, &format!("'{}' child exited or missing", self.service.name));
+                }
 
-                        self.child = None;
+                if shutdown_flag.load(Ordering::SeqCst) {
+                    break;
+                }
 
-                        if shutdown_flag.load(Ordering::SeqCst) {
-                            break;
-                        }
-
-                        match self.service.restart {
-                            RestartPolicy::Always |
-                            RestartPolicy::OnFailure if !status.success() => {
-                                thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
-                                self.start()?;
-                                self.state = ServiceState::Starting;
-                            }
-                            _ => break,
-                        }
+                match self.service.restart {
+                    RestartPolicy::Always |
+                    RestartPolicy::OnFailure => {
+                        thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
+                        self.start()?; // no overlapping borrow now
+                        self.state = ServiceState::Starting;
                     }
-                    Ok(None) => {}
-                    Err(e) => {
-                        self.state = ServiceState::Failed;
-                        return Err(BloomError::Custom(format!("Error watching '{}': {}", self.service.name, e)));
-                    }
-                },
-                None => break,
+                    RestartPolicy::Never => break,
+                }
             }
 
             thread::sleep(Duration::from_millis(250));
