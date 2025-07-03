@@ -67,13 +67,47 @@ impl Supervisor {
     }
 
     pub fn stop(&mut self) -> Result<(), BloomError> {
-        if let Some(child) = self.child.take() {
+        if let Some(mut child) = self.child.take() {
             self.state = ServiceState::Stopping;
             let pid = child.id();
 
             let mut con = self.console_logger.lock().unwrap();
             let mut file = self.file_logger.lock().unwrap();
+
+            // Call stop_service to send signals and wait for process exit
             stop_service(&self.service, pid, &mut *con, &mut *file)?;
+
+            // Wait explicitly for child process exit with timeout
+            let wait_start = Instant::now();
+            let wait_timeout = Duration::from_secs(3);
+
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        file.log(LogLevel::Info, &format!("Process '{}' exited with {:?}", self.service.name, status));
+                        break;
+                    }
+                    Ok(None) => {
+                        if wait_start.elapsed() > wait_timeout {
+                            file.log(LogLevel::Warn, &format!("Process '{}' did not exit after {}s, sending SIGKILL", self.service.name, wait_timeout.as_secs()));
+                            #[cfg(unix)]
+                            {
+                                use nix::sys::signal::{kill, Signal};
+                                use nix::unistd::Pid;
+                                let nix_pid = Pid::from_raw(pid as i32);
+                                let _ = kill(nix_pid, Signal::SIGKILL);
+                                file.log(LogLevel::Warn, &format!("Sent SIGKILL to '{}'", self.service.name));
+                            }
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(e) => {
+                        file.log(LogLevel::Fail, &format!("Failed to wait on process '{}': {}", self.service.name, e));
+                        break;
+                    }
+                }
+            }
         }
 
         self.state = ServiceState::Stopped;

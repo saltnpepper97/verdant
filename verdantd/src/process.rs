@@ -84,10 +84,29 @@ pub fn stop_service(
 ) -> Result<(), BloomError> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
+    use std::process::Command;
+    use std::time::{Instant, Duration};
 
     let nix_pid = Pid::from_raw(pid as i32);
 
-    // Run optional stop command
+    // First check if process exists
+    match kill(nix_pid, None) {
+        Err(nix::Error::ESRCH) => {
+            let msg = format!("Process {} already exited", pid);
+            console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
+            file_logger.log(LogLevel::Info, &msg);
+            return Ok(());
+        }
+        Err(e) => {
+            let msg = format!("Error checking process {}: {}", pid, e);
+            console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
+            file_logger.log(LogLevel::Warn, &msg);
+            // Continue anyway
+        }
+        Ok(_) => {}
+    }
+
+    // Run optional stop_cmd if defined
     if let Some(stop_cmd) = &service.stop_cmd {
         console_logger.message(LogLevel::Info, &format!("Running stop command for '{}'", service.name), Duration::ZERO);
         file_logger.log(LogLevel::Info, &format!("Running stop command for '{}'", service.name));
@@ -108,23 +127,32 @@ pub fn stop_service(
         console_logger.message(level, &msg, Duration::ZERO);
         file_logger.log(level, &msg);
 
-        std::thread::sleep(Duration::from_secs(service.timeout_stop.unwrap_or(5)));
+        // Sleep shorter here if you want faster shutdown
+        std::thread::sleep(Duration::from_secs(service.timeout_stop.unwrap_or(2).min(2)));
     }
 
-    // Try SIGTERM first
-    let _ = kill(nix_pid, Signal::SIGTERM);
-    console_logger.message(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid), Duration::ZERO);
-    file_logger.log(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid));
+    // Send SIGTERM, check errors
+    match kill(nix_pid, Signal::SIGTERM) {
+        Ok(_) => {
+            console_logger.message(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid), Duration::ZERO);
+            file_logger.log(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid));
+        }
+        Err(e) => {
+            let msg = format!("Failed to send SIGTERM to pid {}: {}", pid, e);
+            console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
+            file_logger.log(LogLevel::Warn, &msg);
+        }
+    }
 
     let grace = Duration::from_secs(service.timeout_stop.unwrap_or(5));
     let start = Instant::now();
 
-    // Poll for process exit
+    // Poll process exit with small sleeps and return ASAP
     while start.elapsed() < grace {
         match kill(nix_pid, None) {
-            Ok(_) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(_) => std::thread::sleep(Duration::from_millis(50)),
             Err(nix::Error::ESRCH) => {
-                // Already exited
+                // Process exited cleanly
                 let msg = format!("Process {} exited after SIGTERM", pid);
                 console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
                 file_logger.log(LogLevel::Info, &msg);
@@ -139,16 +167,24 @@ pub fn stop_service(
         }
     }
 
-    // Send SIGKILL after timeout
-    let _ = kill(nix_pid, Signal::SIGKILL);
-    console_logger.message(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid), Duration::ZERO);
-    file_logger.log(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid));
+    // After timeout, send SIGKILL
+    match kill(nix_pid, Signal::SIGKILL) {
+        Ok(_) => {
+            console_logger.message(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid), Duration::ZERO);
+            file_logger.log(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid));
+        }
+        Err(e) => {
+            let msg = format!("Failed to send SIGKILL to pid {}: {}", pid, e);
+            console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
+            file_logger.log(LogLevel::Warn, &msg);
+        }
+    }
 
-    // Wait up to 1s after SIGKILL
+    // Wait briefly after SIGKILL
     let kill_wait = Instant::now();
     while kill_wait.elapsed() < Duration::from_secs(1) {
         match kill(nix_pid, None) {
-            Ok(_) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(_) => std::thread::sleep(Duration::from_millis(50)),
             Err(nix::Error::ESRCH) => {
                 let msg = format!("Process {} exited after SIGKILL", pid);
                 console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
@@ -169,5 +205,4 @@ pub fn stop_service(
     file_logger.log(LogLevel::Fail, &msg);
     Err(BloomError::Custom(msg))
 }
-
 
