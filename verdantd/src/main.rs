@@ -92,11 +92,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         file.log(LogLevel::Info, "verdantd exiting cleanly.");
     }
 
-    {
-        let mut mgr = manager.lock().unwrap();
-        mgr.shutdown(Arc::clone(&shutdown_flag))?; // <- graceful cleanup
-    }
-
     let socket_path = bloom::ipc::VERDANTD_SOCKET_PATH;
     if std::path::Path::new(socket_path).exists() {
         if let Err(e) = std::fs::remove_file(socket_path) {
