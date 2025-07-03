@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
-use nix::unistd::{setgid, setuid, Gid, Uid};
+use nix::unistd::{setgid, setuid, getpgid, Gid, Uid, Pid};
 use nix::libc;
 
 use bloom::errors::BloomError;
@@ -133,6 +133,30 @@ pub fn start_service(
     })
 }
 
+/// Kill entire process group of given pid with SIGTERM
+#[cfg(unix)]
+fn kill_process_group(pid: u32, file_logger: &mut dyn FileLogger, service_name: &str) -> Result<(), BloomError> {
+    match getpgid(Some(Pid::from_raw(pid as i32))) {
+        Ok(pgid) => {
+            use nix::sys::signal::{killpg, Signal};
+            if let Err(e) = killpg(pgid, Signal::SIGTERM) {
+                let msg = format!("Failed to send SIGTERM to PGID {} of '{}': {}", pgid, service_name, e);
+                file_logger.log(LogLevel::Warn, &msg);
+                Err(BloomError::Custom(msg))
+            } else {
+                let msg = format!("Sent SIGTERM to PGID {} of '{}'", pgid, service_name);
+                file_logger.log(LogLevel::Info, &msg);
+                Ok(())
+            }
+        }
+        Err(e) => {
+            let msg = format!("Failed to get PGID for PID {} of '{}': {}", pid, service_name, e);
+            file_logger.log(LogLevel::Warn, &msg);
+            Err(BloomError::Custom(msg))
+        }
+    }
+}
+
 pub fn stop_service(
     service: &ServiceFile,
     child_pid: u32,
@@ -141,12 +165,9 @@ pub fn stop_service(
 ) -> Result<(), BloomError> {
     let timer = ProcessTimer::start();
 
-    // If stop-cmd defined, run it, otherwise send SIGTERM
     if let Some(stop_cmd) = &service.stop_cmd {
-        // Run the stop-cmd as shell command with env var MAINPID
         let cmdline = stop_cmd.replace("$MAINPID", &child_pid.to_string());
 
-        // Simple shell spawn
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(&cmdline)
@@ -159,12 +180,8 @@ pub fn stop_service(
             file_logger.log(LogLevel::Warn, &msg);
         }
     } else {
-        // Default: send SIGTERM
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(child_pid as i32),
-            nix::sys::signal::Signal::SIGTERM,
-        )
-        .map_err(|e| BloomError::Custom(format!("Failed to send SIGTERM: {}", e)))?;
+        // Send SIGTERM to whole process group instead of just PID
+        kill_process_group(child_pid, file_logger, &service.name)?;
     }
 
     let msg = format!("Stopped service '{}', pid {}", service.name, child_pid);
@@ -173,3 +190,4 @@ pub fn stop_service(
 
     Ok(())
 }
+

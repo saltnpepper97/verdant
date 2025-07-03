@@ -70,6 +70,21 @@ impl Supervisor {
             drop(file);
             drop(con);
 
+            self.wait_for_exit_with_timeout(Duration::from_secs(5));
+
+            // If still alive, escalate
+            if let Some(child) = &mut self.child {
+                if child.try_wait().ok().flatten().is_none() {
+                    #[cfg(unix)]
+                    {
+                        use nix::sys::signal::{kill, Signal};
+                        use nix::unistd::Pid;
+                        let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+            }
+
             self.child = None;
             self.state = ServiceState::Stopped;
 
@@ -83,42 +98,7 @@ impl Supervisor {
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        // Try graceful stop first
         let result = self.stop();
-
-        // Wait a bit, then escalate if needed
-        self.wait_for_exit_with_timeout(Duration::from_secs(3));
-
-        // If still running, escalate to SIGKILL
-        if let Some(child) = &mut self.child {
-            #[cfg(unix)]
-            {
-                use nix::sys::signal::{kill, Signal};
-                use nix::unistd::Pid;
-
-                let pid = child.id() as i32;
-
-                // Check if process still exists before sending SIGKILL
-                if nix::sys::signal::kill(Pid::from_raw(pid), None).is_ok() {
-                    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-
-                    {
-                        let mut file = self.file_logger.lock().unwrap();
-                        file.log(
-                            LogLevel::Warn,
-                            &format!(
-                                "Service '{}' did not stop gracefully, SIGKILL sent",
-                                self.service.name
-                            ),
-                        );
-                    }
-                    // Give kernel a moment to clean up
-                    thread::sleep(Duration::from_millis(200));
-                }
-            }
-            self.child = None;
-            self.state = ServiceState::Stopped;
-        }
 
         {
             let mut file = self.file_logger.lock().unwrap();
@@ -150,13 +130,11 @@ impl Supervisor {
                     let mut file = self.file_logger.lock().unwrap();
                     file.log(
                         LogLevel::Info,
-                        &format!("Shutdown flag detected. Stopping '{}'", self.service.name),
+                        &format!("Shutdown flag detected. Attempting graceful stop of '{}'", self.service.name),
                     );
                 }
 
-                // Shutdown forcibly, no restart during shutdown
                 let _ = self.shutdown();
-
                 break;
             }
 
@@ -173,17 +151,15 @@ impl Supervisor {
 
                         self.child = None;
 
+                        if shutdown_flag.load(Ordering::SeqCst) {
+                            return Ok(());
+                        }
+
                         match self.service.restart {
                             RestartPolicy::Always => {
                                 self.restart_count += 1;
                                 if let Some(delay) = self.service.restart_delay {
                                     thread::sleep(Duration::from_secs(delay));
-                                }
-
-                                // Don't restart if shutdown in progress
-                                if shutdown_flag.load(Ordering::SeqCst) {
-                                    let _ = self.shutdown();
-                                    return Ok(());
                                 }
 
                                 self.state = ServiceState::Starting;
@@ -198,11 +174,6 @@ impl Supervisor {
                                     self.restart_count += 1;
                                     if let Some(delay) = self.service.restart_delay {
                                         thread::sleep(Duration::from_secs(delay));
-                                    }
-
-                                    if shutdown_flag.load(Ordering::SeqCst) {
-                                        let _ = self.shutdown();
-                                        return Ok(());
                                     }
 
                                     self.state = ServiceState::Starting;
@@ -236,16 +207,14 @@ impl Supervisor {
             };
 
             if current_state != last_state {
-                {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(
-                        LogLevel::Info,
-                        &format!(
-                            "Service '{}' state changed: {:?} → {:?}",
-                            self.service.name, last_state, current_state
-                        ),
-                    );
-                }
+                let mut file = self.file_logger.lock().unwrap();
+                file.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Service '{}' state changed: {:?} → {:?}",
+                        self.service.name, last_state, current_state
+                    ),
+                );
                 last_state = current_state;
             }
 
@@ -262,52 +231,37 @@ impl Supervisor {
             match self.child.as_mut() {
                 Some(child) => match child.try_wait() {
                     Ok(Some(_)) => {
-                        self.child = None;
                         self.state = ServiceState::Stopped;
-                        {
-                            let mut file = self.file_logger.lock().unwrap();
-                            file.log(
-                                LogLevel::Info,
-                                &format!("Service '{}' stopped cleanly on shutdown.", self.service.name),
-                            );
-                        }
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(
+                            LogLevel::Info,
+                            &format!("Service '{}' stopped cleanly on shutdown.", self.service.name),
+                        );
                         break;
                     }
                     Ok(None) => {
                         if start.elapsed() > timeout {
-                            {
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(
-                                    LogLevel::Warn,
-                                    &format!(
-                                        "Timeout waiting for service '{}' to stop; sending SIGKILL",
-                                        self.service.name
-                                    ),
-                                );
-                            }
-                            #[cfg(unix)]
-                            {
-                                use nix::sys::signal::{kill, Signal};
-                                use nix::unistd::Pid;
-                                let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
-                            }
-                            thread::sleep(Duration::from_millis(200));
-                            break;
-                        } else {
-                            thread::sleep(Duration::from_millis(100));
-                        }
-                    }
-                    Err(e) => {
-                        {
                             let mut file = self.file_logger.lock().unwrap();
                             file.log(
-                                LogLevel::Fail,
+                                LogLevel::Warn,
                                 &format!(
-                                    "Error waiting for service '{}': {}",
-                                    self.service.name, e
+                                    "Timeout waiting for service '{}' to stop; will escalate.",
+                                    self.service.name
                                 ),
                             );
+                            break;
                         }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(e) => {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(
+                            LogLevel::Fail,
+                            &format!(
+                                "Error waiting for service '{}': {}",
+                                self.service.name, e
+                            ),
+                        );
                         break;
                     }
                 },
