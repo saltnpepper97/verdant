@@ -196,16 +196,15 @@ fn handle_client(
                         }
                     }
                 }
+
+                if let Some(tx_arc) = shutdown_done_tx {
+                    if let Ok(mut opt) = tx_arc.lock() {
+                        if let Some(tx) = opt.take() {
+                            let _ = tx.send(()); // Send only after shutdown finishes!
+                        }
+                    }
+                }
             });
-
-if let Some(tx) = shutdown_done_tx {
-    if let Ok(mut opt) = tx.lock() {
-        if let Some(real_tx) = opt.take() {
-            let _ = real_tx.send(());
-        }
-    }
-}
-
 
             Ok(())
         }
