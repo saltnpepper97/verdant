@@ -213,9 +213,20 @@ impl Supervisor {
             self.start()?;
         }
 
-        let mut logged_clean_exit = false;
+        let mut _logged_clean_exit = false;
 
         while !shutdown_flag.load(Ordering::SeqCst) {
+            // If tty@ service with logged-in user, mark stopped and skip restarting
+            if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
+                if self.state != ServiceState::Stopped {
+                    self.state = ServiceState::Stopped;
+                    let mut file = self.file_logger.lock().unwrap();
+                    file.log(LogLevel::Info, &format!("Service '{}' stopped due to active user login", self.service.name));
+                }
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+
             match self.child_has_exited() {
                 None => {
                     // Still running
@@ -223,13 +234,13 @@ impl Supervisor {
                 }
                 Some(true) => {
                     // Clean exit
-                    if !logged_clean_exit {
+                    if !_logged_clean_exit {
                         let mut file = self.file_logger.lock().unwrap();
                         file.log(
                             LogLevel::Info,
                             &format!("Service '{}' exited cleanly (status 0)", self.service.name),
                         );
-                        logged_clean_exit = true;
+                        _logged_clean_exit = true;
                     }
                     break; // Do not restart on clean exit
                 }
@@ -246,13 +257,6 @@ impl Supervisor {
 
                     if shutdown_flag.load(Ordering::SeqCst) {
                         break;
-                    }
-
-                    // For tty@ services, only restart if no logged-in user
-                    if self.is_tty_logged_in() {
-                        self.state = ServiceState::Stopped;
-                        thread::sleep(Duration::from_secs(1));
-                        continue;
                     }
 
                     match self.service.restart {
