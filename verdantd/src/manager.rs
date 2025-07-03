@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use bloom::errors::BloomError;
 use bloom::log::{ConsoleLogger, FileLogger};
@@ -10,7 +9,6 @@ use bloom::status::LogLevel;
 
 use crate::service_file::ServiceFile;
 use crate::supervisor::Supervisor;
-use crate::shutdown_manager::ShutdownManager;
 
 pub struct ServiceManager {
     supervisors: HashMap<String, Supervisor>,
@@ -53,6 +51,7 @@ impl ServiceManager {
         );
 
         self.supervisors.insert(supervisor.service.name.clone(), supervisor);
+
         Ok(())
     }
 
@@ -78,7 +77,7 @@ impl ServiceManager {
                 for name in &to_spawn {
                     if let Some(pkg) = self.supervisors.get(name).and_then(|s| s.service.startup_package.clone()) {
                         let per_service_msg = format!("Started service '{}' with startup package '{}'", name, pkg);
-                        con.message(LogLevel::Info, &per_service_msg, Duration::ZERO);
+                        con.message(LogLevel::Info, &per_service_msg, std::time::Duration::ZERO);
                         file.log(LogLevel::Info, &per_service_msg);
                     }
                 }
@@ -93,7 +92,7 @@ impl ServiceManager {
                 file.log(LogLevel::Info, &summary_msg);
             } else {
                 let msg = "No startup packages found";
-                con.message(LogLevel::Warn, msg, Duration::ZERO);
+                con.message(LogLevel::Warn, msg, std::time::Duration::ZERO);
                 file.log(LogLevel::Warn, msg);
             }
         }
@@ -117,6 +116,7 @@ impl ServiceManager {
     pub fn spawn_supervisor_thread(
         &mut self,
         name: String,
+        shutdown_flag: Arc<AtomicBool>,
     ) -> Result<(), BloomError> {
         if self.handles.contains_key(&name) {
             return Ok(());
@@ -132,7 +132,7 @@ impl ServiceManager {
         ));
 
         let handle = thread::spawn(move || {
-            if let Err(e) = supervisor.supervise_loop() {
+            if let Err(e) = supervisor.supervise_loop(shutdown_flag) {
                 eprintln!("Supervisor for service '{}' exited with error: {:?}", supervisor.service.name, e);
             }
         });
@@ -141,56 +141,48 @@ impl ServiceManager {
         Ok(())
     }
 
-    pub fn supervise_all(&mut self) -> Result<(), BloomError> {
+    pub fn supervise_all(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
         for name in self.supervisors.keys().cloned().collect::<Vec<_>>() {
-            self.spawn_supervisor_thread(name)?;
+            self.spawn_supervisor_thread(name, Arc::clone(&shutdown_flag))?;
         }
         Ok(())
     }
 
-    /// Shutdown all services and join supervisor threads.
-    /// Returns the loggers for reuse after shutdown.
-    pub fn shutdown(
-        &mut self,
-        shutdown_flag: Arc<AtomicBool>,
-    ) -> Result<(Arc<Mutex<dyn ConsoleLogger + Send + Sync>>, Arc<Mutex<dyn FileLogger + Send + Sync>>), BloomError> {
-        shutdown_flag.store(true, Ordering::SeqCst);
-
+    pub fn shutdown(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
         {
             let mut file = self.file_logger.lock().unwrap();
-            file.log(LogLevel::Info, "Shutdown: Flag set. Preparing supervisor list.");
+            file.log(LogLevel::Info, "Shutdown: Setting shutdown flag for all supervisors");
         }
 
-        let supervisor_list: Vec<Arc<Mutex<Supervisor>>> = self.supervisors
-            .drain()
-            .map(|(_, supervisor)| Arc::new(Mutex::new(supervisor)))
-            .collect();
+        // Signal all supervisor loops to exit
+        shutdown_flag.store(true, Ordering::SeqCst);
 
-        let shutdown_manager = ShutdownManager::new(
-            supervisor_list,
-            Arc::clone(&self.console_logger),
-            Arc::clone(&self.file_logger),
-        );
-
-        shutdown_manager.shutdown_all(Duration::from_secs(5))?;
+        // Stop all child services gracefully
+        for supervisor in self.supervisors.values_mut() {
+            let _ = supervisor.shutdown();
+        }
 
         {
             let mut file = self.file_logger.lock().unwrap();
             file.log(LogLevel::Info, "Shutdown: Joining all supervisor threads");
         }
 
+        // Join supervisor threads to ensure clean exit
         for (name, handle) in self.handles.drain() {
             if let Err(e) = handle.join() {
                 eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
             }
         }
 
+        // Clear all supervisors after shutdown complete
+        self.supervisors.clear();
+
         {
             let mut file = self.file_logger.lock().unwrap();
             file.log(LogLevel::Info, "Shutdown: Completed");
         }
 
-        Ok((Arc::clone(&self.console_logger), Arc::clone(&self.file_logger)))
+        Ok(())
     }
 }
 

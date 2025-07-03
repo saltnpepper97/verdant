@@ -139,7 +139,7 @@ fn handle_client(
                     Err(_) => return,
                 };
 
-                // Step 4: Call ServiceManager shutdown method
+                // Step 4: Shutdown all services (supervisors observe shutdown flag and exit)
                 if let Err(e) = sm_guard.shutdown(Arc::clone(&shutdown_flag_clone)) {
                     let msg = format!("Failed to shutdown services: {}", e);
                     if let Ok(mut con) = sm_guard.get_console_logger().lock() {
