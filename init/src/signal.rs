@@ -13,6 +13,7 @@ use signal_hook::{consts::signal::*, iterator::Signals};
 
 pub fn install_signal_handlers(
     shutdown_flag: Arc<AtomicBool>,
+    reboot_flag: Arc<AtomicBool>,
     file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>>,
     console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
     main_thread: std::thread::Thread,
@@ -23,7 +24,7 @@ pub fn install_signal_handlers(
         SIGINT,
         SIGPWR,
         SIGUSR1, // reboot
-        SIGUSR2, // halt
+        SIGUSR2, // halt/shutdown
     ];
 
     let mut signals = Signals::new(handled_signals)
@@ -56,25 +57,35 @@ pub fn install_signal_handlers(
                     }
                 }
 
-                SIGTERM | SIGINT | SIGPWR | SIGUSR2 => {
+                SIGTERM | SIGINT | SIGPWR => {
                     let msg = match signal {
-                        SIGTERM => "Received SIGTERM",
-                        SIGINT => "Received SIGINT",
-                        SIGPWR => "Received SIGPWR (ACPI power event)",
-                        SIGUSR2 => "Received SIGUSR2 (halt request)",
-                        _ => "Received shutdown signal",
+                        SIGTERM => "Ignored SIGTERM (external shutdown attempt)",
+                        SIGINT => "Ignored SIGINT (Ctrl+C)",
+                        SIGPWR => "Ignored SIGPWR (power event)",
+                        _ => "Ignored signal",
                     };
 
                     if let Ok(mut log) = file_logger.lock() {
-                        log.log(LogLevel::Warn, &format!("{}, scheduling shutdown", msg));
+                        log.log(LogLevel::Info, msg);
                     }
                     if let Ok(mut con) = console_logger.lock() {
-                        con.message(LogLevel::Warn, &format!("{}, scheduling shutdown", msg), timer.elapsed());
+                        con.message(LogLevel::Info, msg, timer.elapsed());
+                    }
+
+                    // Do nothing — we only shut down via IPC or SIGUSR signals
+                }
+
+                SIGUSR2 => {
+                    let msg = "Received SIGUSR2 (halt/shutdown request)";
+                    if let Ok(mut log) = file_logger.lock() {
+                        log.log(LogLevel::Warn, msg);
+                    }
+                    if let Ok(mut con) = console_logger.lock() {
+                        con.message(LogLevel::Warn, msg, timer.elapsed());
                     }
 
                     shutdown_flag.store(true, Ordering::SeqCst);
                     main_thread.unpark();
-                    break;
                 }
 
                 SIGUSR1 => {
@@ -86,10 +97,8 @@ pub fn install_signal_handlers(
                         con.message(LogLevel::Warn, msg, timer.elapsed());
                     }
 
-                    // If you have a reboot flag instead, you'd use that here:
-                    shutdown_flag.store(true, Ordering::SeqCst);
+                    reboot_flag.store(true, Ordering::SeqCst);
                     main_thread.unpark();
-                    break;
                 }
 
                 _ => {}
