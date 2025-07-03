@@ -66,53 +66,28 @@ impl Supervisor {
         Ok(())
     }
 
-    pub fn stop(&mut self) -> Result<(), BloomError> {
-        if let Some(mut child) = self.child.take() {
-            self.state = ServiceState::Stopping;
-            let pid = child.id();
 
-            let mut con = self.console_logger.lock().unwrap();
-            let mut file = self.file_logger.lock().unwrap();
+pub fn stop(&mut self) -> Result<(), BloomError> {
+    if let Some(child) = self.child.take() {
+        self.state = ServiceState::Stopping;
+        let pid = child.id();
 
-            // Call stop_service to send signals and wait for process exit
-            stop_service(&self.service, pid, &mut *con, &mut *file)?;
+        let mut con = self.console_logger.lock().unwrap();
+        let mut file = self.file_logger.lock().unwrap();
 
-            // Wait explicitly for child process exit with timeout
-            let wait_start = Instant::now();
-            let wait_timeout = Duration::from_secs(3);
-
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        file.log(LogLevel::Info, &format!("Process '{}' exited with {:?}", self.service.name, status));
-                        break;
-                    }
-                    Ok(None) => {
-                        if wait_start.elapsed() > wait_timeout {
-                            file.log(LogLevel::Warn, &format!("Process '{}' did not exit after {}s, sending SIGKILL", self.service.name, wait_timeout.as_secs()));
-                            #[cfg(unix)]
-                            {
-                                use nix::sys::signal::{kill, Signal};
-                                use nix::unistd::Pid;
-                                let nix_pid = Pid::from_raw(pid as i32);
-                                let _ = kill(nix_pid, Signal::SIGKILL);
-                                file.log(LogLevel::Warn, &format!("Sent SIGKILL to '{}'", self.service.name));
-                            }
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                    Err(e) => {
-                        file.log(LogLevel::Fail, &format!("Failed to wait on process '{}': {}", self.service.name, e));
-                        break;
-                    }
-                }
-            }
+        if let Err(e) = stop_service(&self.service, pid, &mut *con, &mut *file) {
+            let err_msg = format!("Error stopping service '{}': {}", self.service.name, e);
+            con.message(LogLevel::Warn, &err_msg, Duration::ZERO);
+            file.log(LogLevel::Warn, &err_msg);
         }
-
+        self.state = ServiceState::Stopped;
+        Ok(())
+    } else {
+        // No child process; nothing to stop, but that's OK
         self.state = ServiceState::Stopped;
         Ok(())
     }
+}
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
         let result = self.stop();
