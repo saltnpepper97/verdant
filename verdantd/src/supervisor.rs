@@ -89,7 +89,8 @@ impl Supervisor {
             nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(pid as i32),
                 nix::sys::signal::Signal::SIGKILL,
-            ).ok();
+            )
+            .ok();
 
             for _ in 0..10 {
                 if let Ok(Some(_)) = child.try_wait() {
@@ -100,7 +101,10 @@ impl Supervisor {
             }
 
             self.state = ServiceState::Failed;
-            return Err(BloomError::Custom(format!("Failed to stop service '{}'", self.service.name)));
+            return Err(BloomError::Custom(format!(
+                "Failed to stop service '{}'",
+                self.service.name
+            )));
         } else {
             self.state = ServiceState::Stopped;
             Ok(())
@@ -120,28 +124,33 @@ impl Supervisor {
     }
 
     /// Check if child process has exited, update state accordingly.
-    /// Distinguish clean exit (status.success()) and failure.
-    fn child_has_exited(&mut self) -> bool {
+    /// Returns:
+    /// - Some(true) if exited cleanly (status 0)
+    /// - Some(false) if exited with failure or error
+    /// - None if still running
+    fn child_has_exited(&mut self) -> Option<bool> {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     self.child = None;
                     if status.success() {
-                        self.state = ServiceState::Stopped;  // clean exit
+                        self.state = ServiceState::Stopped;
+                        Some(true)
                     } else {
-                        self.state = ServiceState::Failed;   // failed exit code
+                        self.state = ServiceState::Failed;
+                        Some(false)
                     }
-                    true
                 }
-                Ok(None) => false,
+                Ok(None) => None,
                 Err(_) => {
                     self.child = None;
                     self.state = ServiceState::Failed;
-                    true
+                    Some(false)
                 }
             }
         } else {
-            true
+            // No child means stopped cleanly or not running
+            Some(true)
         }
     }
 
@@ -204,41 +213,58 @@ impl Supervisor {
             self.start()?;
         }
 
+        let mut logged_clean_exit = false;
+
         while !shutdown_flag.load(Ordering::SeqCst) {
-            if self.child_has_exited() {
-                if !self.restarting {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(LogLevel::Warn, &format!("'{}' child exited or missing", self.service.name));
-                    self.restarting = true;
+            match self.child_has_exited() {
+                None => {
+                    // Still running
+                    self.restarting = false;
                 }
-
-                if shutdown_flag.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                // For tty@ services, only restart if no logged-in user
-                if self.is_tty_logged_in() {
-                    self.state = ServiceState::Stopped;
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
-
-                // Do NOT restart if exited cleanly
-                if self.state == ServiceState::Stopped {
-                    break; // Clean exit, stop restarting
-                }
-
-                match self.service.restart {
-                    RestartPolicy::Always | RestartPolicy::OnFailure => {
-                        thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
-                        self.start()?;
-                        self.state = ServiceState::Starting;
-                        self.restarting = false;
+                Some(true) => {
+                    // Clean exit
+                    if !logged_clean_exit {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(
+                            LogLevel::Info,
+                            &format!("Service '{}' exited cleanly (status 0)", self.service.name),
+                        );
+                        logged_clean_exit = true;
                     }
-                    RestartPolicy::Never => break,
+                    break; // Do not restart on clean exit
                 }
-            } else {
-                self.restarting = false;
+                Some(false) => {
+                    // Failed exit
+                    if !self.restarting {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(
+                            LogLevel::Warn,
+                            &format!("Service '{}' exited with failure", self.service.name),
+                        );
+                        self.restarting = true;
+                    }
+
+                    if shutdown_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    // For tty@ services, only restart if no logged-in user
+                    if self.is_tty_logged_in() {
+                        self.state = ServiceState::Stopped;
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+
+                    match self.service.restart {
+                        RestartPolicy::Always | RestartPolicy::OnFailure => {
+                            thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
+                            self.start()?;
+                            self.state = ServiceState::Starting;
+                            self.restarting = false;
+                        }
+                        RestartPolicy::Never => break,
+                    }
+                }
             }
 
             thread::sleep(Duration::from_millis(250));
