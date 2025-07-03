@@ -96,6 +96,7 @@ impl Supervisor {
     }
 
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+        // Start the service if not already running
         if self.child.is_none() {
             self.state = ServiceState::Starting;
             if let Err(e) = self.start() {
@@ -107,7 +108,10 @@ impl Supervisor {
         let mut last_state = self.state;
 
         loop {
+            // Exit loop immediately if shutdown requested
             if shutdown_flag.load(Ordering::SeqCst) {
+                // Ensure child is stopped on shutdown
+                let _ = self.shutdown();
                 break;
             }
 
@@ -124,12 +128,20 @@ impl Supervisor {
 
                         self.child = None;
 
+                        // Early shutdown check - stop restarting if shutdown requested
                         if shutdown_flag.load(Ordering::SeqCst) {
+                            let _ = self.shutdown();
                             return Ok(());
                         }
 
                         match self.service.restart {
                             RestartPolicy::Always => {
+                                // Double check shutdown flag before restarting
+                                if shutdown_flag.load(Ordering::SeqCst) {
+                                    let _ = self.shutdown();
+                                    return Ok(());
+                                }
+
                                 self.restart_count += 1;
 
                                 {
@@ -147,6 +159,7 @@ impl Supervisor {
                                     thread::sleep(Duration::from_secs(delay));
                                 }
 
+                                // Final shutdown check before starting
                                 if shutdown_flag.load(Ordering::SeqCst) {
                                     let _ = self.shutdown();
                                     return Ok(());
@@ -161,6 +174,12 @@ impl Supervisor {
                             }
                             RestartPolicy::OnFailure => {
                                 if !status.success() {
+                                    // Check shutdown flag before restarting on failure
+                                    if shutdown_flag.load(Ordering::SeqCst) {
+                                        let _ = self.shutdown();
+                                        return Ok(());
+                                    }
+
                                     self.restart_count += 1;
 
                                     {
