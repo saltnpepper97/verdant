@@ -4,6 +4,8 @@ desc: WiFi connection manager
 cmd: /sbin/wpa_supplicant
 args: -c /etc/wpa_supplicant/wpa_supplicant.conf -i wlan0 -B
 
+startup-package: network
+
 restart: always
 restart-delay: 3
 

@@ -193,27 +193,25 @@ impl Supervisor {
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
+
+            if self.service.name.starts_with("tty@") {
+                if self.is_tty_logged_in() {
+                    break;
+                } else {
+                    if !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                        break;
+                    }
+                }
+            } else {
+                if  !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                    break;
+                }
+            }
+
             match self.child_has_exited() {
                 Some(true) => {
                     if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
                         break;
-                    }
-
-                    match self.service.restart {
-                        RestartPolicy::Never => break,
-
-                        RestartPolicy::Always => {
-                            if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
-                            
-                            } else {
-                                thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
-                                let _ = self.start();
-                            }
-                        }
-
-                        RestartPolicy::OnFailure => {
-                            break;
-                        }
                     }
                 }
                 Some(false) => {
@@ -224,15 +222,11 @@ impl Supervisor {
                         break;
                     }
 
-                    match self.service.restart {
-                        RestartPolicy::Always | RestartPolicy::OnFailure => {
-                            if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
-                            } else {
-                                thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
-                                let _ = self.start();
-                            }
-                        }
-                        _ => break,
+                    if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                        thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
+                        let _ = self.start();
+                    } else {
+                        break;
                     }
                 }
             }
