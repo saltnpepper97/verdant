@@ -213,6 +213,31 @@ impl Supervisor {
                     if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
                         break;
                     }
+
+                    if self.service.name.starts_with("tty@") {
+                        if matches!(self.service.restart, RestartPolicy::Always) {
+                            loop {
+                                if shutdown_flag.load(Ordering::SeqCst) {
+                                    break;
+                                }
+
+                                if !self.is_tty_logged_in() {
+                                    let _ = self.start();
+                                    break;
+                                }
+
+                                thread::sleep(Duration::from_secs(1));
+                            }
+                        } else {
+                            break;
+                        }
+                    } else if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                        thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
+                        let _ = self.start();
+                    }
+                    else {
+                        break;
+                    }
                 }
                 Some(false) => {
                     self.set_state(ServiceState::Running);
