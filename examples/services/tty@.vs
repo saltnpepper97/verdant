@@ -1,4 +1,4 @@
-name: tty@{id}
+name: tty@{}
 desc: Login prompt using getty on /dev/{}
 
 cmd: /sbin/getty
