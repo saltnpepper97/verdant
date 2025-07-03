@@ -87,7 +87,7 @@ pub fn stop_service(
 
     let nix_pid = Pid::from_raw(pid as i32);
 
-    // Run stop command if any
+    // Run optional stop command
     if let Some(stop_cmd) = &service.stop_cmd {
         console_logger.message(LogLevel::Info, &format!("Running stop command for '{}'", service.name), Duration::ZERO);
         file_logger.log(LogLevel::Info, &format!("Running stop command for '{}'", service.name));
@@ -98,94 +98,68 @@ pub fn stop_service(
             .status()
             .map_err(BloomError::Io)?;
 
-        if !status.success() {
-            let msg = format!("Stop command failed for '{}'", service.name);
-            console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
-            file_logger.log(LogLevel::Warn, &msg);
+        let msg = if status.success() {
+            format!("Stop command succeeded for '{}'", service.name)
         } else {
-            let msg = format!("Stop command succeeded for '{}'", service.name);
-            console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
-            file_logger.log(LogLevel::Info, &msg);
-        }
+            format!("Stop command failed for '{}'", service.name)
+        };
+
+        let level = if status.success() { LogLevel::Info } else { LogLevel::Warn };
+        console_logger.message(level, &msg, Duration::ZERO);
+        file_logger.log(level, &msg);
 
         std::thread::sleep(Duration::from_secs(service.timeout_stop.unwrap_or(5)));
     }
 
-    // Helper: check if process exists
-    fn process_exists(pid: Pid) -> Result<bool, BloomError> {
-        match kill(pid, None) {
-            Ok(_) => Ok(true),
-            Err(nix::Error::ESRCH) => Ok(false),
-            Err(e) => Err(BloomError::Custom(format!("Error checking process status: {}", e))),
-        }
-    }
-
-    // Send SIGTERM and wait for graceful exit
-    if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
-        if let nix::Error::ESRCH = e {
-            let msg = format!("Process {} not found; already stopped", pid);
-            console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
-            file_logger.log(LogLevel::Info, &msg);
-            return Ok(());
-        } else {
-            let msg = format!("Failed to send SIGTERM to pid {}: {}", pid, e);
-            console_logger.message(LogLevel::Fail, &msg, Duration::ZERO);
-            file_logger.log(LogLevel::Fail, &msg);
-            return Err(BloomError::Custom(msg));
-        }
-    }
-
+    // Try SIGTERM first
+    let _ = kill(nix_pid, Signal::SIGTERM);
     console_logger.message(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid), Duration::ZERO);
     file_logger.log(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid));
 
-    let timeout = Duration::from_secs(service.timeout_stop.unwrap_or(5));
+    let grace = Duration::from_secs(service.timeout_stop.unwrap_or(5));
     let start = Instant::now();
 
-    while start.elapsed() < timeout {
-        match process_exists(nix_pid)? {
-            false => {
+    // Poll for process exit
+    while start.elapsed() < grace {
+        match kill(nix_pid, None) {
+            Ok(_) => std::thread::sleep(Duration::from_millis(100)),
+            Err(nix::Error::ESRCH) => {
+                // Already exited
                 let msg = format!("Process {} exited after SIGTERM", pid);
                 console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
                 file_logger.log(LogLevel::Info, &msg);
                 return Ok(());
             }
-            true => {
-                std::thread::sleep(Duration::from_millis(100));
+            Err(e) => {
+                let msg = format!("Error checking process {} status: {}", pid, e);
+                console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
+                file_logger.log(LogLevel::Warn, &msg);
+                break;
             }
         }
     }
 
-    // Timeout expired, send SIGKILL
-    if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
-        if let nix::Error::ESRCH = e {
-            let msg = format!("Process {} already exited before SIGKILL", pid);
-            console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
-            file_logger.log(LogLevel::Info, &msg);
-            return Ok(());
-        } else {
-            let msg = format!("Failed to send SIGKILL to pid {}: {}", pid, e);
-            console_logger.message(LogLevel::Fail, &msg, Duration::ZERO);
-            file_logger.log(LogLevel::Fail, &msg);
-            return Err(BloomError::Custom(msg));
-        }
-    }
-
+    // Send SIGKILL after timeout
+    let _ = kill(nix_pid, Signal::SIGKILL);
     console_logger.message(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid), Duration::ZERO);
     file_logger.log(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid));
 
-    let kill_timeout = Duration::from_secs(2);
-    let start_kill = Instant::now();
-
-    while start_kill.elapsed() < kill_timeout {
-        match process_exists(nix_pid)? {
-            false => {
+    // Wait up to 1s after SIGKILL
+    let kill_wait = Instant::now();
+    while kill_wait.elapsed() < Duration::from_secs(1) {
+        match kill(nix_pid, None) {
+            Ok(_) => std::thread::sleep(Duration::from_millis(100)),
+            Err(nix::Error::ESRCH) => {
                 let msg = format!("Process {} exited after SIGKILL", pid);
                 console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
                 file_logger.log(LogLevel::Info, &msg);
                 return Ok(());
             }
-            true => {
-                std::thread::sleep(Duration::from_millis(100));
+            Err(e) => {
+                let msg = format!("Error checking process {} status: {}", pid, e);
+                console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
+                file_logger.log(LogLevel::Warn, &msg);
+                break;
             }
         }
     }
@@ -195,4 +169,5 @@ pub fn stop_service(
     file_logger.log(LogLevel::Fail, &msg);
     Err(BloomError::Custom(msg))
 }
+
 

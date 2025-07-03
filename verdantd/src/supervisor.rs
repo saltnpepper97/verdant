@@ -67,48 +67,17 @@ impl Supervisor {
     }
 
     pub fn stop(&mut self) -> Result<(), BloomError> {
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.take() {
             self.state = ServiceState::Stopping;
             let pid = child.id();
 
-            {
-                let mut con = self.console_logger.lock().unwrap();
-                let mut file = self.file_logger.lock().unwrap();
-                stop_service(&self.service, pid, &mut *con, &mut *file)?;
-            }
-
-            for _ in 0..20 {
-                if let Ok(Some(_)) = child.try_wait() {
-                    self.state = ServiceState::Stopped;
-                    return Ok(());
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-
-            // Force kill if needed
-            nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            )
-            .ok();
-
-            for _ in 0..10 {
-                if let Ok(Some(_)) = child.try_wait() {
-                    self.state = ServiceState::Stopped;
-                    return Ok(());
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-
-            self.state = ServiceState::Failed;
-            return Err(BloomError::Custom(format!(
-                "Failed to stop service '{}'",
-                self.service.name
-            )));
-        } else {
-            self.state = ServiceState::Stopped;
-            Ok(())
+            let mut con = self.console_logger.lock().unwrap();
+            let mut file = self.file_logger.lock().unwrap();
+            stop_service(&self.service, pid, &mut *con, &mut *file)?;
         }
+
+        self.state = ServiceState::Stopped;
+        Ok(())
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
@@ -123,11 +92,6 @@ impl Supervisor {
         result
     }
 
-    /// Check if child process has exited, update state accordingly.
-    /// Returns:
-    /// - Some(true) if exited cleanly (status 0)
-    /// - Some(false) if exited with failure or error
-    /// - None if still running
     fn child_has_exited(&mut self) -> Option<bool> {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
@@ -149,12 +113,10 @@ impl Supervisor {
                 }
             }
         } else {
-            // No child means stopped cleanly or not running
             Some(true)
         }
     }
 
-    /// Detect active logged-in user on tty@ services
     fn is_tty_logged_in(&self) -> bool {
         if !self.service.name.starts_with("tty@") {
             return false;
@@ -191,7 +153,6 @@ impl Supervisor {
             for fd_entry in fd_dir.flatten() {
                 if let Ok(link_target) = fs::read_link(fd_entry.path()) {
                     if link_target == Path::new(&tty_path) {
-                        // Exclude getty/agetty processes (login prompts)
                         let comm_path = format!("/proc/{}/comm", pid);
                         if let Ok(comm) = fs::read_to_string(&comm_path) {
                             let proc_name = comm.trim();
@@ -206,9 +167,7 @@ impl Supervisor {
         false
     }
 
-    /// Main supervise loop for this service
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-        // Start service if not running
         if self.child.is_none() {
             self.start()?;
         }
@@ -216,7 +175,6 @@ impl Supervisor {
         let mut _logged_clean_exit = false;
 
         while !shutdown_flag.load(Ordering::SeqCst) {
-            // If tty@ service with logged-in user, mark stopped and skip restarting
             if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
                 if self.state != ServiceState::Stopped {
                     self.state = ServiceState::Stopped;
@@ -229,11 +187,9 @@ impl Supervisor {
 
             match self.child_has_exited() {
                 None => {
-                    // Still running
                     self.restarting = false;
                 }
                 Some(true) => {
-                    // Clean exit
                     if !_logged_clean_exit {
                         let mut file = self.file_logger.lock().unwrap();
                         file.log(
@@ -242,10 +198,9 @@ impl Supervisor {
                         );
                         _logged_clean_exit = true;
                     }
-                    break; // Do not restart on clean exit
+                    break;
                 }
                 Some(false) => {
-                    // Failed exit
                     if !self.restarting {
                         let mut file = self.file_logger.lock().unwrap();
                         file.log(
