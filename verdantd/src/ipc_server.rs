@@ -97,6 +97,7 @@ fn handle_client(
 ) -> std::io::Result<()> {
     use std::io::BufReader;
     use std::thread;
+    use std::time::Duration;
 
     let mut buf = Vec::new();
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -131,22 +132,37 @@ fn handle_client(
             let sm = Arc::clone(&service_manager);
             let shutdown_flag_clone = Arc::clone(&shutdown_flag);
             thread::spawn(move || {
-                // Step 3: Set shutdown flag BEFORE shutting down services
                 shutdown_flag_clone.store(true, Ordering::SeqCst);
 
-                let mut sm_guard = match sm.lock() {
-                    Ok(sm) => sm,
-                    Err(_) => return,
-                };
+                // Step 3: Perform shutdown and extract loggers
+                let (console_logger, file_logger, shutdown_result) = {
+                    let mut sm_guard = match sm.lock() {
+                        Ok(sm) => sm,
+                        Err(_) => return,
+                    };
 
-                // Step 4: Shutdown all services (supervisors observe shutdown flag and exit)
-                if let Err(e) = sm_guard.shutdown() {
-                    let msg = format!("Failed to shutdown services: {}", e);
-                    if let Ok(mut con) = sm_guard.get_console_logger().lock() {
-                        con.message(LogLevel::Fail, &msg, std::time::Duration::ZERO);
+                    let console_logger = sm_guard.get_console_logger();
+                    let file_logger = sm_guard.get_file_logger();
+                    let shutdown_result = sm_guard.shutdown(); // joins threads
+
+                    (console_logger, file_logger, shutdown_result)
+                }; // 🔥 Drop ServiceManager lock here
+
+                // Step 4: Log shutdown result
+                match shutdown_result {
+                    Ok(_) => {
+                        if let Ok(mut file) = file_logger.lock() {
+                            file.log(LogLevel::Info, "All services shut down");
+                        }
                     }
-                    if let Ok(mut file) = sm_guard.get_file_logger().lock() {
-                        file.log(LogLevel::Fail, &msg);
+                    Err(e) => {
+                        let msg = format!("Failed to shutdown services: {}", e);
+                        if let Ok(mut con) = console_logger.lock() {
+                            con.message(LogLevel::Fail, &msg, Duration::ZERO);
+                        }
+                        if let Ok(mut file) = file_logger.lock() {
+                            file.log(LogLevel::Fail, &msg);
+                        }
                     }
                 }
 
@@ -159,28 +175,28 @@ fn handle_client(
                 match send_ipc_request(INIT_SOCKET_PATH, &init_request) {
                     Ok(response) if response.success => {
                         let msg = format!("Sent {:?} to init: {}", request.command, response.message);
-                        if let Ok(mut con) = sm_guard.get_console_logger().lock() {
-                            con.message(LogLevel::Info, &msg, std::time::Duration::ZERO);
+                        if let Ok(mut con) = console_logger.lock() {
+                            con.message(LogLevel::Info, &msg, Duration::ZERO);
                         }
-                        if let Ok(mut file) = sm_guard.get_file_logger().lock() {
+                        if let Ok(mut file) = file_logger.lock() {
                             file.log(LogLevel::Info, &msg);
                         }
                     }
                     Ok(response) => {
                         let msg = format!("Init rejected {:?}: {}", request.command, response.message);
-                        if let Ok(mut con) = sm_guard.get_console_logger().lock() {
-                            con.message(LogLevel::Warn, &msg, std::time::Duration::ZERO);
+                        if let Ok(mut con) = console_logger.lock() {
+                            con.message(LogLevel::Warn, &msg, Duration::ZERO);
                         }
-                        if let Ok(mut file) = sm_guard.get_file_logger().lock() {
+                        if let Ok(mut file) = file_logger.lock() {
                             file.log(LogLevel::Warn, &msg);
                         }
                     }
                     Err(e) => {
                         let msg = format!("Failed to send command to init: {}", e);
-                        if let Ok(mut con) = sm_guard.get_console_logger().lock() {
-                            con.message(LogLevel::Warn, &msg, std::time::Duration::ZERO);
+                        if let Ok(mut con) = console_logger.lock() {
+                            con.message(LogLevel::Warn, &msg, Duration::ZERO);
                         }
-                        if let Ok(mut file) = sm_guard.get_file_logger().lock() {
+                        if let Ok(mut file) = file_logger.lock() {
                             file.log(LogLevel::Warn, &msg);
                         }
                     }
