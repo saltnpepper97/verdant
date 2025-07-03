@@ -78,34 +78,10 @@ pub fn start_service(
 /// Stop the service by sending stop command or killing the process
 pub fn stop_service(
     service: &ServiceFile,
-    pid: u32,
+    _pid: u32,
     console_logger: &mut dyn ConsoleLogger,
     file_logger: &mut dyn FileLogger,
 ) -> Result<(), BloomError> {
-    use nix::sys::signal::{kill, Signal};
-    use nix::unistd::Pid;
-    use std::process::Command;
-    use std::time::{Duration, Instant};
-
-    let nix_pid = Pid::from_raw(pid as i32);
-
-    // Check if process exists
-    match kill(nix_pid, None) {
-        Err(nix::Error::ESRCH) => {
-            let msg = format!("Process {} already exited", pid);
-            console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
-            file_logger.log(LogLevel::Info, &msg);
-            return Ok(());
-        }
-        Err(e) => {
-            let msg = format!("Error checking process {}: {}", pid, e);
-            console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
-            file_logger.log(LogLevel::Warn, &msg);
-        }
-        Ok(_) => {}
-    }
-
-    // Only run stop_cmd if process still alive
     if let Some(stop_cmd) = &service.stop_cmd {
         console_logger.message(LogLevel::Info, &format!("Running stop command for '{}'", service.name), Duration::ZERO);
         file_logger.log(LogLevel::Info, &format!("Running stop command for '{}'", service.name));
@@ -122,67 +98,15 @@ pub fn stop_service(
         } else {
             format!("Stop command failed for '{}'", service.name)
         };
+
         console_logger.message(level, &msg, Duration::ZERO);
         file_logger.log(level, &msg);
-
-        // Short sleep to let stop_cmd do its job, capped to 1s max
-        std::thread::sleep(Duration::from_secs(service.timeout_stop.unwrap_or(1).min(1)));
+    } else {
+        file_logger.log(LogLevel::Info, &format!(
+            "No stop command defined for '{}', assuming service exits on shutdown",
+            service.name
+        ));
     }
-
-    // Send SIGTERM
-    let _ = kill(nix_pid, Signal::SIGTERM);
-    console_logger.message(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid), Duration::ZERO);
-    file_logger.log(LogLevel::Info, &format!("Sent SIGTERM to pid {}", pid));
-
-    // Poll quickly for up to 500ms for process exit
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_millis(500) {
-        match kill(nix_pid, None) {
-            Ok(_) => std::thread::sleep(Duration::from_millis(50)),
-            Err(nix::Error::ESRCH) => {
-                let msg = format!("Process {} exited after SIGTERM", pid);
-                console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
-                file_logger.log(LogLevel::Info, &msg);
-                return Ok(());
-            }
-            Err(e) => {
-                let msg = format!("Error checking process {} status: {}", pid, e);
-                console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
-                file_logger.log(LogLevel::Warn, &msg);
-                break;
-            }
-        }
-    }
-
-    // Send SIGKILL if still alive
-    let _ = kill(nix_pid, Signal::SIGKILL);
-    console_logger.message(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid), Duration::ZERO);
-    file_logger.log(LogLevel::Warn, &format!("Sent SIGKILL to pid {}", pid));
-
-    // Wait briefly after SIGKILL (max 200ms)
-    let kill_start = Instant::now();
-    while kill_start.elapsed() < Duration::from_millis(200) {
-        match kill(nix_pid, None) {
-            Ok(_) => std::thread::sleep(Duration::from_millis(50)),
-            Err(nix::Error::ESRCH) => {
-                let msg = format!("Process {} exited after SIGKILL", pid);
-                console_logger.message(LogLevel::Info, &msg, Duration::ZERO);
-                file_logger.log(LogLevel::Info, &msg);
-                return Ok(());
-            }
-            Err(e) => {
-                let msg = format!("Error checking process {} status: {}", pid, e);
-                console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
-                file_logger.log(LogLevel::Warn, &msg);
-                break;
-            }
-        }
-    }
-
-    // If still here, process stubbornly alive or gone but weird
-    let msg = format!("Process {} did not exit after SIGKILL, continuing anyway", pid);
-    console_logger.message(LogLevel::Warn, &msg, Duration::ZERO);
-    file_logger.log(LogLevel::Warn, &msg);
 
     Ok(())
 }

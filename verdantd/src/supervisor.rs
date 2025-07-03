@@ -179,16 +179,11 @@ impl Supervisor {
             self.start()?;
         }
 
-        let mut previous_logged_in = false;
 
         loop {
             let logged_in = self.is_tty_logged_in();
 
             if self.service.name.starts_with("tty@") && logged_in {
-                if !previous_logged_in {
-                    self.set_state(ServiceState::Stopped);
-                }
-                previous_logged_in = true;
 
                 if shutdown_flag.load(Ordering::SeqCst) {
                     break;
@@ -196,8 +191,6 @@ impl Supervisor {
 
                 thread::sleep(Duration::from_secs(1));
                 continue;
-            } else {
-                previous_logged_in = false;
             }
 
             match self.child_has_exited() {
