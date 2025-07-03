@@ -108,12 +108,6 @@ impl Supervisor {
 
         loop {
             if shutdown_flag.load(Ordering::SeqCst) {
-                if let Some(child) = &mut self.child {
-                    let _ = child.kill(); // Best-effort, ignore error
-                    let _ = child.wait(); // Ensure it reaps
-                    self.child = None;
-                    self.state = ServiceState::Stopped;
-                }
                 break;
             }
 
