@@ -190,6 +190,9 @@ impl Supervisor {
         }
 
         loop {
+            if shutdown_flag.load(Ordering::SeqCst) {
+                break;
+            }
             let logged_in = self.is_tty_logged_in();
 
             if self.service.name.starts_with("tty@") && logged_in {
