@@ -131,11 +131,13 @@ fn handle_client(
             // Step 2: Spawn thread to coordinate shutdown
             let sm = Arc::clone(&service_manager);
             let shutdown_flag_clone = Arc::clone(&shutdown_flag);
+            let cmd = request.command.clone();
+
             thread::spawn(move || {
                 shutdown_flag_clone.store(true, Ordering::SeqCst);
 
-                // Step 3: Perform shutdown and extract loggers
-                let (console_logger, file_logger, shutdown_result) = {
+                // Step 3: Call shutdown(), extract join handles *under lock*
+                let handles = {
                     let mut sm_guard = match sm.lock() {
                         Ok(sm) => sm,
                         Err(_) => return,
@@ -143,61 +145,68 @@ fn handle_client(
 
                     let console_logger = sm_guard.get_console_logger();
                     let file_logger = sm_guard.get_file_logger();
-                    let shutdown_result = sm_guard.shutdown(); // joins threads
 
-                    (console_logger, file_logger, shutdown_result)
-                }; // 🔥 Drop ServiceManager lock here
+                    // Call shutdown (stops services but does NOT join threads)
+                    let shutdown_result = sm_guard.shutdown();
 
-                // Step 4: Log shutdown result
-                match shutdown_result {
-                    Ok(_) => {
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Info, "All services shut down");
+                    // Log shutdown result
+                    match &shutdown_result {
+                        Ok(_) => {
+                            if let Ok(mut file) = file_logger.lock() {
+                                file.log(LogLevel::Info, "All services stopped");
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to shutdown services: {}", e);
+                            if let Ok(mut con) = console_logger.lock() {
+                                con.message(LogLevel::Fail, &msg, Duration::ZERO);
+                            }
+                            if let Ok(mut file) = file_logger.lock() {
+                                file.log(LogLevel::Fail, &msg);
+                            }
                         }
                     }
-                    Err(e) => {
-                        let msg = format!("Failed to shutdown services: {}", e);
-                        if let Ok(mut con) = console_logger.lock() {
-                            con.message(LogLevel::Fail, &msg, Duration::ZERO);
-                        }
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Fail, &msg);
-                        }
+
+                    // Extract handles for joining AFTER dropping lock
+                    sm_guard.take_handles()
+                };
+
+                // Step 4: Join supervisor threads (lock is dropped here)
+                for (name, handle) in handles {
+                    if let Err(e) = handle.join() {
+                        eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
                     }
                 }
 
                 // Step 5: Send shutdown/reboot command to init
                 let init_request = IpcRequest {
                     target: IpcTarget::Init,
-                    command: request.command.clone(),
+                    command: cmd,
                 };
 
                 match send_ipc_request(INIT_SOCKET_PATH, &init_request) {
                     Ok(response) if response.success => {
-                        let msg = format!("Sent {:?} to init: {}", request.command, response.message);
-                        if let Ok(mut con) = console_logger.lock() {
-                            con.message(LogLevel::Info, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
+                            con.message(LogLevel::Info, &format!("Sent shutdown command to init: {}", response.message), Duration::ZERO);
                         }
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Info, &msg);
+                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
+                            file.log(LogLevel::Info, &format!("Sent shutdown command to init: {}", response.message));
                         }
                     }
                     Ok(response) => {
-                        let msg = format!("Init rejected {:?}: {}", request.command, response.message);
-                        if let Ok(mut con) = console_logger.lock() {
-                            con.message(LogLevel::Warn, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
+                            con.message(LogLevel::Warn, &format!("Init rejected shutdown command: {}", response.message), Duration::ZERO);
                         }
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Warn, &msg);
+                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
+                            file.log(LogLevel::Warn, &format!("Init rejected shutdown command: {}", response.message));
                         }
                     }
                     Err(e) => {
-                        let msg = format!("Failed to send command to init: {}", e);
-                        if let Ok(mut con) = console_logger.lock() {
-                            con.message(LogLevel::Warn, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
+                            con.message(LogLevel::Warn, &format!("Failed to send shutdown command to init: {}", e), Duration::ZERO);
                         }
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Warn, &msg);
+                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
+                            file.log(LogLevel::Warn, &format!("Failed to send shutdown command to init: {}", e));
                         }
                     }
                 }

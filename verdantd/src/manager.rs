@@ -162,24 +162,10 @@ pub fn shutdown(&mut self) -> Result<(), BloomError> {
         }
     }
 
-    // Step 2: Drop locks before joining threads!
-    // Join all supervisor threads
-    if self.handles.is_empty() {
-        let mut file = self.file_logger.lock().unwrap();
-        file.log(LogLevel::Info, "Shutdown: No supervisor threads to join");
-    } else {
-        for (name, handle) in self.handles.drain() {
-            if let Err(e) = handle.join() {
-                eprintln!("Supervisor thread for service '{}' panicked: {:?}", name, e);
-            }
-        }
-    }
-
-    // Step 3: Clear supervisors after shutdown and joining threads
-    self.supervisors.clear();
-
     Ok(())
 }
-
+    pub fn take_handles(&mut self) -> std::collections::HashMap<String, std::thread::JoinHandle<()>> {
+        std::mem::take(&mut self.handles)
+    }
 }
 
