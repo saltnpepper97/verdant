@@ -4,24 +4,23 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
-use std::time::Duration;
-use std::thread;
 
 use crate::manager::ServiceManager;
 
-use bloom::ipc::{
-    send_ipc_request, IpcRequest, IpcTarget, IpcCommand, IpcResponse,
-    serialize_response, VERDANTD_SOCKET_PATH, INIT_SOCKET_PATH,
-};
+use bloom::ipc::{send_ipc_request, IpcRequest, IpcTarget, IpcCommand, IpcResponse, serialize_response, VERDANTD_SOCKET_PATH, INIT_SOCKET_PATH};
 use bloom::status::LogLevel;
 use serde_json;
+use std::sync::mpsc;
 
 pub fn run_ipc_server(
     service_manager: Arc<Mutex<ServiceManager>>,
     shutdown_flag: Arc<AtomicBool>,
     ready_tx: Option<mpsc::Sender<()>>,
+    shutdown_done_tx: Option<Arc<Mutex<Option<mpsc::Sender<()>>>>>,
 ) -> std::io::Result<()> {
+    use std::time::Duration;
+
+    // Clone the logger Arc handles inside the lock guard scope to extend their lifetime
     let (console_logger, file_logger) = {
         let sm = service_manager.lock().unwrap();
         (sm.get_console_logger().clone(), sm.get_file_logger().clone())
@@ -59,8 +58,8 @@ pub fn run_ipc_server(
         match stream_result {
             Ok(mut stream) => {
                 let sm_clone = Arc::clone(&service_manager);
-                let flag_clone = Arc::clone(&shutdown_flag);
-                if let Err(e) = handle_client(&mut stream, sm_clone, flag_clone) {
+                let shutdown_tx_clone = shutdown_done_tx.as_ref().map(Arc::clone);
+                if let Err(e) = handle_client(&mut stream, sm_clone, Arc::clone(&shutdown_flag), shutdown_tx_clone) {
                     let (console_logger, file_logger) = {
                         let sm = service_manager.lock().unwrap();
                         (sm.get_console_logger().clone(), sm.get_file_logger().clone())
@@ -97,8 +96,11 @@ fn handle_client(
     stream: &mut UnixStream,
     service_manager: Arc<Mutex<ServiceManager>>,
     shutdown_flag: Arc<AtomicBool>,
+    shutdown_done_tx: Option<Arc<Mutex<Option<mpsc::Sender<()>>>>>
 ) -> std::io::Result<()> {
     use std::io::BufReader;
+    use std::thread;
+    use std::time::Duration;
 
     let mut buf = Vec::new();
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -133,11 +135,14 @@ fn handle_client(
             let cmd = request.command.clone();
 
             thread::spawn(move || {
+                shutdown_flag_clone.store(true, Ordering::SeqCst);
+
                 let mut sm_guard = match sm.lock() {
                     Ok(sm) => sm,
                     Err(_) => return,
                 };
 
+                // Clone logger handles before calling shutdown to avoid simultaneous borrow
                 let console_logger = sm_guard.get_console_logger().clone();
                 let file_logger = sm_guard.get_file_logger().clone();
 
@@ -160,8 +165,6 @@ fn handle_client(
                     }
                 }
 
-                drop(sm_guard); // explicitly release the lock before sending IPC
-
                 let init_request = IpcRequest {
                     target: IpcTarget::Init,
                     command: cmd,
@@ -169,37 +172,40 @@ fn handle_client(
 
                 match send_ipc_request(INIT_SOCKET_PATH, &init_request) {
                     Ok(response) if response.success => {
-                        let msg = format!("Sent shutdown command to init: {}", response.message);
-                        if let Ok(mut con) = console_logger.lock() {
-                            con.message(LogLevel::Info, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
+                            con.message(LogLevel::Info, &format!("Sent shutdown command to init: {}", response.message), Duration::ZERO);
                         }
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Info, &msg);
+                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
+                            file.log(LogLevel::Info, &format!("Sent shutdown command to init: {}", response.message));
                         }
                     }
                     Ok(response) => {
-                        let msg = format!("Init rejected shutdown command: {}", response.message);
-                        if let Ok(mut con) = console_logger.lock() {
-                            con.message(LogLevel::Warn, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
+                            con.message(LogLevel::Warn, &format!("Init rejected shutdown command: {}", response.message), Duration::ZERO);
                         }
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Warn, &msg);
+                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
+                            file.log(LogLevel::Warn, &format!("Init rejected shutdown command: {}", response.message));
                         }
                     }
                     Err(e) => {
-                        let msg = format!("Failed to send shutdown command to init: {}", e);
-                        if let Ok(mut con) = console_logger.lock() {
-                            con.message(LogLevel::Warn, &msg, Duration::ZERO);
+                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
+                            con.message(LogLevel::Warn, &format!("Failed to send shutdown command to init: {}", e), Duration::ZERO);
                         }
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Warn, &msg);
+                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
+                            file.log(LogLevel::Warn, &format!("Failed to send shutdown command to init: {}", e));
                         }
                     }
                 }
-
-                // Only after services are shutdown and IPC sent do we signal the main loop to exit
-                shutdown_flag_clone.store(true, Ordering::SeqCst);
             });
+
+if let Some(tx) = shutdown_done_tx {
+    if let Ok(mut opt) = tx.lock() {
+        if let Some(real_tx) = opt.take() {
+            let _ = real_tx.send(());
+        }
+    }
+}
+
 
             Ok(())
         }

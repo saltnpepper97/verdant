@@ -8,7 +8,7 @@ mod service_file;
 mod supervisor;
 
 use std::sync::{Arc, Mutex, mpsc};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::thread;
 
 use bloom::log::{ConsoleLogger, ConsoleLoggerImpl, FileLogger, FileLoggerImpl};
@@ -65,9 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
     let (ipc_ready_tx, ipc_ready_rx) = mpsc::channel();
+    let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
+    let shutdown_done_tx = Arc::new(Mutex::new(Some(shutdown_done_tx)));
 
     thread::spawn(move || {
-        if let Err(e) = ipc_server::run_ipc_server(ipc_manager, ipc_shutdown_flag, Some(ipc_ready_tx)) {
+        if let Err(e) = ipc_server::run_ipc_server(ipc_manager, ipc_shutdown_flag, Some(ipc_ready_tx), Some(shutdown_done_tx)) {
             eprintln!("IPC server error: {}", e);
         }
     });
@@ -81,10 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         con.banner(banner);
     }
 
-    // Main thread watches shutdown flag
-    while !shutdown_flag.load(Ordering::SeqCst) {
-        thread::sleep(std::time::Duration::from_millis(500));
-    }
+
+    // Wait until shutdown actually completes
+    shutdown_done_rx.recv().expect("Failed to receive shutdown completion signal");
     
     // Use console logger to emit clean shutdown log
     {
