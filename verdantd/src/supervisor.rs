@@ -96,8 +96,6 @@ impl Supervisor {
     }
 
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-        let mut last_state = self.state;
-
         if self.child.is_none() {
             self.state = ServiceState::Starting;
             if let Err(e) = self.start() {
@@ -105,6 +103,8 @@ impl Supervisor {
                 return Err(e);
             }
         }
+
+        let mut last_state = self.state;
 
         loop {
             if shutdown_flag.load(Ordering::SeqCst) {
@@ -136,11 +136,7 @@ impl Supervisor {
                                 }
 
                                 if shutdown_flag.load(Ordering::SeqCst) {
-                                    // Drop lock before shutdown call
-                                    let _ = {
-                                        // no lock here, just call shutdown
-                                        self.shutdown()
-                                    };
+                                    let _ = self.shutdown();
                                     return Ok(());
                                 }
 
@@ -181,10 +177,13 @@ impl Supervisor {
                         }
                     }
                     Ok(None) => {
-                        if self.state == ServiceState::Starting {
-                            ServiceState::Running
-                        } else {
-                            self.state
+                        match self.state {
+                            ServiceState::Starting => {
+                                self.state = ServiceState::Running;
+                                ServiceState::Running
+                            }
+                            ServiceState::Running => ServiceState::Running,
+                            other => other, // Avoid jump from Stopped → Running
                         }
                     }
                     Err(e) => {
