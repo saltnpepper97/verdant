@@ -96,7 +96,6 @@ impl Supervisor {
     }
 
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-        // Start the service if not already running
         if self.child.is_none() {
             self.state = ServiceState::Starting;
             if let Err(e) = self.start() {
@@ -108,10 +107,7 @@ impl Supervisor {
         let mut last_state = self.state;
 
         loop {
-            // Exit loop immediately if shutdown requested
             if shutdown_flag.load(Ordering::SeqCst) {
-                // Ensure child is stopped on shutdown
-                let _ = self.shutdown();
                 break;
             }
 
@@ -128,38 +124,17 @@ impl Supervisor {
 
                         self.child = None;
 
-                        // Early shutdown check - stop restarting if shutdown requested
                         if shutdown_flag.load(Ordering::SeqCst) {
-                            let _ = self.shutdown();
                             return Ok(());
                         }
 
                         match self.service.restart {
                             RestartPolicy::Always => {
-                                // Double check shutdown flag before restarting
-                                if shutdown_flag.load(Ordering::SeqCst) {
-                                    let _ = self.shutdown();
-                                    return Ok(());
-                                }
-
                                 self.restart_count += 1;
-
-                                {
-                                    let mut file = self.file_logger.lock().unwrap();
-                                    file.log(
-                                        LogLevel::Info,
-                                        &format!(
-                                            "Restarting service '{}' (attempt #{})",
-                                            self.service.name, self.restart_count
-                                        ),
-                                    );
-                                }
-
                                 if let Some(delay) = self.service.restart_delay {
                                     thread::sleep(Duration::from_secs(delay));
                                 }
 
-                                // Final shutdown check before starting
                                 if shutdown_flag.load(Ordering::SeqCst) {
                                     let _ = self.shutdown();
                                     return Ok(());
@@ -174,25 +149,7 @@ impl Supervisor {
                             }
                             RestartPolicy::OnFailure => {
                                 if !status.success() {
-                                    // Check shutdown flag before restarting on failure
-                                    if shutdown_flag.load(Ordering::SeqCst) {
-                                        let _ = self.shutdown();
-                                        return Ok(());
-                                    }
-
                                     self.restart_count += 1;
-
-                                    {
-                                        let mut file = self.file_logger.lock().unwrap();
-                                        file.log(
-                                            LogLevel::Info,
-                                            &format!(
-                                                "Restarting service '{}' (attempt #{}) due to failure",
-                                                self.service.name, self.restart_count
-                                            ),
-                                        );
-                                    }
-
                                     if let Some(delay) = self.service.restart_delay {
                                         thread::sleep(Duration::from_secs(delay));
                                     }
@@ -219,14 +176,16 @@ impl Supervisor {
                             }
                         }
                     }
-                    Ok(None) => match self.state {
-                        ServiceState::Starting => {
-                            self.state = ServiceState::Running;
-                            ServiceState::Running
+                    Ok(None) => {
+                        match self.state {
+                            ServiceState::Starting => {
+                                self.state = ServiceState::Running;
+                                ServiceState::Running
+                            }
+                            ServiceState::Running => ServiceState::Running,
+                            other => other, // Avoid jump from Stopped → Running
                         }
-                        ServiceState::Running => ServiceState::Running,
-                        other => other,
-                    },
+                    }
                     Err(e) => {
                         self.state = ServiceState::Failed;
                         return Err(BloomError::Custom(format!(
@@ -238,14 +197,16 @@ impl Supervisor {
             };
 
             if current_state != last_state {
-                let mut file = self.file_logger.lock().unwrap();
-                file.log(
-                    LogLevel::Info,
-                    &format!(
-                        "Service '{}' state changed: {:?} → {:?}",
-                        self.service.name, last_state, current_state
-                    ),
-                );
+                {
+                    let mut file = self.file_logger.lock().unwrap();
+                    file.log(
+                        LogLevel::Info,
+                        &format!(
+                            "Service '{}' state changed: {:?} → {:?}",
+                            self.service.name, last_state, current_state
+                        ),
+                    );
+                }
                 last_state = current_state;
             }
 
