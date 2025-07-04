@@ -190,79 +190,69 @@ impl Supervisor {
     }
 
     pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+        // Ensure we have a running child at entry
         if self.child.is_none() {
             self.start()?;
         }
 
+        // Track previous login state for tty@ services
         let mut was_logged_in = self.is_tty_logged_in();
 
         loop {
+            // 1) Immediate exit on shutdown
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
 
-            let logged_in = self.is_tty_logged_in();
-
-            match self.child_has_exited() {
-                Some(true) => {
-                    if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
-                        break;
+            // 2) Check whether the child has exited (or never existed)
+            if let Some(exited_successfully) = self.child_has_exited() {
+                // If it exited cleanly, or failed, and we should not restart, break
+                let no_restart = match self.service.restart {
+                    RestartPolicy::Never => true,
+                    // For tty@: only restart if user just logged out
+                    RestartPolicy::Always if self.service.name.starts_with("tty@") => {
+                        let logged_in = self.is_tty_logged_in();
+                        let should_restart = was_logged_in && !logged_in;
+                        was_logged_in = logged_in;
+                        !should_restart
                     }
-
-                    if self.service.name.starts_with("tty@") {
-                        // Restart tty@ only if user just logged out
-                        if !logged_in && was_logged_in {
-                            {
-                                let mut file = self.file_logger.lock().unwrap();
-                                file.log(LogLevel::Info, &format!(
-                                    "TTY '{}' exited and user logged out, restarting",
-                                    self.service.name
-                                ));
-                            } // <- file lock dropped here
-
-                            if let Err(e) = self.start() {
-                                {
-                                    let mut file = self.file_logger.lock().unwrap();
-                                    file.log(LogLevel::Fail, &format!(
-                                        "Failed to restart '{}': {}",
-                                        self.service.name, e
-                                    ));
-                                } // <- file lock dropped here
-                                self.set_state(ServiceState::Failed);
-                                thread::sleep(Duration::from_secs(1));
-                            }
-                        } else {
-                            self.set_state(ServiceState::Stopped);
-                        }
-                    } else {
-                        match self.service.restart {
-                            RestartPolicy::Always | RestartPolicy::OnFailure => {
-                                if let Err(e) = self.start() {
-                                    {
-                                        let mut file = self.file_logger.lock().unwrap();
-                                        file.log(LogLevel::Fail, &format!(
-                                            "Failed to restart '{}': {}",
-                                            self.service.name, e
-                                        ));
-                                    } // <- file lock dropped here
-                                    self.set_state(ServiceState::Failed);
-                                    thread::sleep(Duration::from_secs(1));
-                                }
-                            }
-                            RestartPolicy::Never => break,
-                        }
+                    // For non-tty@ always or on-failure policies
+                    RestartPolicy::Always
+                    | RestartPolicy::OnFailure if !exited_successfully || self.service.restart == RestartPolicy::Always => {
+                        false
                     }
+                    _ => true,
+                };
+
+                if no_restart {
+                    break;
                 }
-                Some(false) => {
-                    self.set_state(ServiceState::Running);
+
+                // Attempt restart
+                if let Err(e) = self.start() {
+                    {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(LogLevel::Fail, &format!("Failed to restart '{}': {}", self.service.name, e));
+                    }
+                    self.set_state(ServiceState::Failed);
+                    // back off a bit
+                    thread::sleep(Duration::from_secs(1));
                 }
-                None => {}
+
+                // continue supervising the new child
+                continue;
             }
 
-            was_logged_in = logged_in;
+            // 3) If still running, ensure the state is correct
+            if self.state != ServiceState::Running {
+                self.set_state(ServiceState::Running);
+            }
+
+            // 4) Poll at a gentle interval
             thread::sleep(Duration::from_millis(300));
         }
 
+        // When the loop exits, do one final shutdown()
         self.shutdown()?;
         Ok(())
     }
