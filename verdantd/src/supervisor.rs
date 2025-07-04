@@ -198,24 +198,28 @@ impl Supervisor {
                 break;
             }
 
-            let exit_status = self.child_exit_status();
-
             let is_tty = self.service.name.starts_with("tty@");
             let user_logged_in = is_tty && self.is_tty_logged_in();
 
-            match exit_status {
+            match self.child_exit_status() {
                 ExitResult::StillRunning => {
-                    if is_tty && user_logged_in {
-                        self.set_state(ServiceState::Stopped); // force state to Stopped if user is active
-                    } else {
-                        self.set_state(ServiceState::Running);
-                    }
+                    self.set_state(ServiceState::Running);
                 }
                 ExitResult::ExitedOk => {
                     match self.service.restart {
                         RestartPolicy::Always => {
                             if is_tty && user_logged_in {
                                 self.set_state(ServiceState::Stopped);
+                                {
+                                    let mut log = self.file_logger.lock().unwrap();
+                                    log.log(LogLevel::Info, &format!("'{}' waiting for user logout before restart", self.service.name));
+                                }
+                                while !shutdown_flag.load(Ordering::SeqCst) && self.is_tty_logged_in() {
+                                    thread::sleep(Duration::from_secs(1));
+                                }
+                                if !shutdown_flag.load(Ordering::SeqCst) {
+                                    let _ = self.start();
+                                }
                             } else {
                                 let _ = self.start();
                             }
@@ -231,6 +235,16 @@ impl Supervisor {
                         RestartPolicy::Always | RestartPolicy::OnFailure => {
                             if is_tty && user_logged_in {
                                 self.set_state(ServiceState::Stopped);
+                                {
+                                    let mut log = self.file_logger.lock().unwrap();
+                                    log.log(LogLevel::Info, &format!("'{}' waiting for user logout before restart", self.service.name));
+                                }
+                                while !shutdown_flag.load(Ordering::SeqCst) && self.is_tty_logged_in() {
+                                    thread::sleep(Duration::from_secs(1));
+                                }
+                                if !shutdown_flag.load(Ordering::SeqCst) {
+                                    let _ = self.start();
+                                }
                             } else {
                                 let _ = self.start();
                             }
