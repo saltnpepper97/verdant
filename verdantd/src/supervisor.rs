@@ -188,80 +188,75 @@ impl Supervisor {
         false
     }
 
-    pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-        if self.child.is_none() {
-            self.start()?;
+
+pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+    // Immediately start if not already
+    if self.child.is_none() {
+        self.start()?;
+    }
+
+    let is_tty = self.service.name.starts_with("tty@");
+
+    loop {
+        if shutdown_flag.load(Ordering::SeqCst) {
+            break;
         }
 
-        loop {
-            if shutdown_flag.load(Ordering::SeqCst) {
-                break;
-            }
+        let exit_status = self.child_exit_status();
+        let mut user_logged_in = false;
+        if is_tty {
+            user_logged_in = self.is_tty_logged_in();
+        }
 
-            let is_tty = self.service.name.starts_with("tty@");
-            let user_logged_in = is_tty && self.is_tty_logged_in();
-
-            match self.child_exit_status() {
-                ExitResult::StillRunning => {
+        match exit_status {
+            ExitResult::StillRunning => {
+                if is_tty && user_logged_in {
+                    // Enforce "stopped" state even while running under login
+                    self.set_state(ServiceState::Stopped);
+                } else {
                     self.set_state(ServiceState::Running);
                 }
-                ExitResult::ExitedOk => {
-                    match self.service.restart {
-                        RestartPolicy::Always => {
-                            if is_tty && user_logged_in {
-                                self.set_state(ServiceState::Stopped);
-                                {
-                                    let mut log = self.file_logger.lock().unwrap();
-                                    log.log(LogLevel::Info, &format!("'{}' waiting for user logout before restart", self.service.name));
-                                }
-                                while !shutdown_flag.load(Ordering::SeqCst) && self.is_tty_logged_in() {
-                                    thread::sleep(Duration::from_secs(1));
-                                }
-                                if !shutdown_flag.load(Ordering::SeqCst) {
-                                    let _ = self.start();
-                                }
-                            } else {
-                                let _ = self.start();
-                            }
-                        }
-                        RestartPolicy::OnFailure | RestartPolicy::Never => {
-                            self.set_state(ServiceState::Stopped);
-                            break;
-                        }
-                    }
-                }
-                ExitResult::ExitedFailed => {
-                    match self.service.restart {
-                        RestartPolicy::Always | RestartPolicy::OnFailure => {
-                            if is_tty && user_logged_in {
-                                self.set_state(ServiceState::Stopped);
-                                {
-                                    let mut log = self.file_logger.lock().unwrap();
-                                    log.log(LogLevel::Info, &format!("'{}' waiting for user logout before restart", self.service.name));
-                                }
-                                while !shutdown_flag.load(Ordering::SeqCst) && self.is_tty_logged_in() {
-                                    thread::sleep(Duration::from_secs(1));
-                                }
-                                if !shutdown_flag.load(Ordering::SeqCst) {
-                                    let _ = self.start();
-                                }
-                            } else {
-                                let _ = self.start();
-                            }
-                        }
-                        RestartPolicy::Never => {
-                            self.set_state(ServiceState::Failed);
-                            break;
-                        }
-                    }
-                }
             }
 
-            thread::sleep(Duration::from_millis(300));
-        }
+            ExitResult::ExitedOk | ExitResult::ExitedFailed => {
+                let exited_clean = matches!(exit_status, ExitResult::ExitedOk);
+                let should_restart = match self.service.restart {
+                    RestartPolicy::Always => true,
+                    RestartPolicy::OnFailure => !exited_clean,
+                    RestartPolicy::Never => false,
+                };
 
-        self.shutdown()?;
-        Ok(())
+                if !should_restart {
+                    self.set_state(if exited_clean { ServiceState::Stopped } else { ServiceState::Failed });
+                    break;
+                }
+
+                if is_tty && user_logged_in {
+                    self.set_state(ServiceState::Stopped);
+                    {
+                        let mut log = self.file_logger.lock().unwrap();
+                        log.log(LogLevel::Info,
+                            &format!("'{}' exited; waiting for tty logout before restart", self.service.name));
+                    }
+                    // WAIT until logout
+                    while !shutdown_flag.load(Ordering::SeqCst) && self.is_tty_logged_in() {
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                    if shutdown_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+
+                // Now safe to restart
+                let _ = self.start();
+            }
+        }
+        thread::sleep(Duration::from_millis(300));
     }
+
+    self.shutdown()?;
+    Ok(())
+}
+
 }
 
