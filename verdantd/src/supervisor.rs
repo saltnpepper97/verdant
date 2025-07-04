@@ -200,10 +200,20 @@ impl Supervisor {
                     if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
                         break;
                     }
-                    self.set_state(ServiceState::Starting);
+                    // If it's a tty@ service and user is logged in, don't restart — just mark stopped
+                    if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
+                        self.set_state(ServiceState::Stopped);
+                    } else {
+                        let _ = self.start(); // Restart only when no one is logged in
+                    }
                 }
                 Some(false) => {
+                // Still running — check if user is logged in on tty@ and reflect state
+                if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
+                    self.set_state(ServiceState::Stopped);
+                } else {
                     self.set_state(ServiceState::Starting);
+                }
                 }
                 None => {
                     if shutdown_flag.load(Ordering::SeqCst) {
