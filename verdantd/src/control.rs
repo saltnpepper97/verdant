@@ -92,6 +92,13 @@ pub fn stop_service(handle: &mut ServiceHandle, timeout: Duration) -> Result<boo
         use nix::unistd::Pid;
 
         let pid = Pid::from_raw(handle.child.id() as i32);
+
+        // Check if it's already exited before signaling
+        if let Ok(Some(_)) = handle.child.try_wait() {
+            // Already exited
+            return Ok(true);
+        }
+
         kill(pid, Signal::SIGTERM).map_err(BloomError::from)?;
 
         match handle.wait_with_timeout(timeout)? {
