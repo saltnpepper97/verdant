@@ -26,6 +26,12 @@ pub struct Supervisor {
     restarting: bool,
 }
 
+enum ExitResult {
+    StillRunning,
+    ExitedOk,
+    ExitedFailed,
+}
+
 impl Supervisor {
     pub fn new(
         service: ServiceFile,
@@ -85,12 +91,11 @@ impl Supervisor {
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        // Skip stopping if tty@ and logged in, assume service exits cleanly on shutdown
         if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
             {
                 let mut file = self.file_logger.lock().unwrap();
                 file.log(LogLevel::Info, &format!("Skipping stop for logged-in '{}'", self.service.name));
-            } 
+            }
             self.set_state(ServiceState::Stopped);
             return Ok(());
         }
@@ -112,28 +117,28 @@ impl Supervisor {
         }
     }
 
-    fn child_has_exited(&mut self) -> Option<bool> {
+    fn child_exit_status(&mut self) -> ExitResult {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     self.child = None;
                     if status.success() {
                         self.set_state(ServiceState::Stopped);
-                        Some(true)
+                        ExitResult::ExitedOk
                     } else {
                         self.set_state(ServiceState::Failed);
-                        Some(false)
+                        ExitResult::ExitedFailed
                     }
                 }
-                Ok(None) => Some(false),
+                Ok(None) => ExitResult::StillRunning,
                 Err(_) => {
                     self.child = None;
                     self.set_state(ServiceState::Failed);
-                    Some(false)
+                    ExitResult::ExitedFailed
                 }
             }
         } else {
-            Some(true)
+            ExitResult::ExitedOk
         }
     }
 
@@ -154,9 +159,8 @@ impl Supervisor {
         };
 
         for entry in proc_dir_iter.flatten() {
-            let file_name = entry.file_name();
-            let file_name_owned = file_name.to_string_lossy().to_string(); // fix for E0716
-            let pid: u32 = match file_name_owned.parse() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let pid: u32 = match file_name.parse() {
                 Ok(n) => n,
                 Err(_) => continue,
             };
@@ -184,44 +188,66 @@ impl Supervisor {
         false
     }
 
-pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-    if self.child.is_none() {
-        self.start()?;
-    }
-
-    loop {
-        if shutdown_flag.load(Ordering::SeqCst) {
-            break;
+    pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+        if self.child.is_none() {
+            self.start()?;
         }
 
-        // Check whether service exited
-        let exited = self.child_has_exited().unwrap_or(false);
-
-        // Check TTY login state if applicable
-        let is_tty = self.service.name.starts_with("tty@");
-        let user_logged_in = if is_tty {
-            self.is_tty_logged_in()
-        } else {
-            false
-        };
-
-        if exited {
-            if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
+        loop {
+            if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
 
-            if is_tty && user_logged_in {
-                self.set_state(ServiceState::Stopped);
-            } else {
-                let _ = self.start(); // Restart if allowed
+            let exit_status = self.child_exit_status();
+
+            let is_tty = self.service.name.starts_with("tty@");
+            let user_logged_in = is_tty && self.is_tty_logged_in();
+
+            match exit_status {
+                ExitResult::StillRunning => {
+                    if is_tty && user_logged_in {
+                        self.set_state(ServiceState::Stopped); // force state to Stopped if user is active
+                    } else {
+                        self.set_state(ServiceState::Running);
+                    }
+                }
+                ExitResult::ExitedOk => {
+                    match self.service.restart {
+                        RestartPolicy::Always => {
+                            if is_tty && user_logged_in {
+                                self.set_state(ServiceState::Stopped);
+                            } else {
+                                let _ = self.start();
+                            }
+                        }
+                        RestartPolicy::OnFailure | RestartPolicy::Never => {
+                            self.set_state(ServiceState::Stopped);
+                            break;
+                        }
+                    }
+                }
+                ExitResult::ExitedFailed => {
+                    match self.service.restart {
+                        RestartPolicy::Always | RestartPolicy::OnFailure => {
+                            if is_tty && user_logged_in {
+                                self.set_state(ServiceState::Stopped);
+                            } else {
+                                let _ = self.start();
+                            }
+                        }
+                        RestartPolicy::Never => {
+                            self.set_state(ServiceState::Failed);
+                            break;
+                        }
+                    }
+                }
             }
+
+            thread::sleep(Duration::from_millis(300));
         }
 
-        thread::sleep(Duration::from_millis(300));
+        self.shutdown()?;
+        Ok(())
     }
-
-    self.shutdown()?;
-    Ok(())
-}
 }
 
