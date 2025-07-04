@@ -12,6 +12,7 @@ use crate::control::{ServiceHandle, start_service, stop_service, restart_service
 pub struct Supervisor {
     pub service: Service,
     pub handle: Option<ServiceHandle>,
+    pub should_run: bool, // NEW: track if this service should continue running
 }
 
 impl Supervisor {
@@ -19,13 +20,14 @@ impl Supervisor {
         Self {
             service,
             handle: None,
+            should_run: true,
         }
     }
 
     /// Start the service if not already running.
     pub fn start(&mut self) -> Result<(), BloomError> {
-        if self.handle.is_some() {
-            // Already running
+        if self.handle.is_some() || !self.should_run {
+            // Already running or not allowed to run again
             return Ok(());
         }
 
@@ -52,6 +54,8 @@ impl Supervisor {
                 ServiceState::Failed
             };
 
+            self.should_run = false; // Once stopped manually, don't restart
+
             Ok(())
         } else {
             // Not running
@@ -65,9 +69,12 @@ impl Supervisor {
         let new_handle_opt = restart_service(&self.service, current_handle)?;
 
         self.handle = new_handle_opt;
+
         self.service.state = if self.handle.is_some() {
             ServiceState::Running
         } else {
+            // Service was not restarted (e.g. restart: never or clean exit)
+            self.should_run = false;
             ServiceState::Stopped
         };
 
@@ -81,14 +88,14 @@ impl Supervisor {
         while running.load(Ordering::Relaxed) {
             if let Some(handle) = &mut self.handle {
                 if !handle.is_running() {
-                    // Process exited unexpectedly
+                    // Process exited
                     self.service.state = ServiceState::Failed;
 
-                    // Attempt restart based on policy
+                    // Try to restart based on policy
                     self.restart()?;
                 }
-            } else {
-                // Not running; try to start
+            } else if self.should_run {
+                // Only auto-start if restart policy allows it
                 self.start()?;
             }
 
