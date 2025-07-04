@@ -184,49 +184,44 @@ impl Supervisor {
         false
     }
 
-    pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-        if self.child.is_none() {
-            self.start()?;
+pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
+    if self.child.is_none() {
+        self.start()?;
+    }
+
+    loop {
+        if shutdown_flag.load(Ordering::SeqCst) {
+            break;
         }
 
-        loop {
-            if shutdown_flag.load(Ordering::SeqCst) {
+        // Check whether service exited
+        let exited = self.child_has_exited().unwrap_or(false);
+
+        // Check TTY login state if applicable
+        let is_tty = self.service.name.starts_with("tty@");
+        let user_logged_in = if is_tty {
+            self.is_tty_logged_in()
+        } else {
+            false
+        };
+
+        if exited {
+            if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
                 break;
             }
 
-
-            match self.child_has_exited() {
-                Some(true) => {
-                    if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
-                        break;
-                    }
-                    // If it's a tty@ service and user is logged in, don't restart — just mark stopped
-                    if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
-                        self.set_state(ServiceState::Stopped);
-                    } else {
-                        let _ = self.start(); // Restart only when no one is logged in
-                    }
-                }
-                Some(false) => {
-                // Still running — check if user is logged in on tty@ and reflect state
-                if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
-                    self.set_state(ServiceState::Stopped);
-                } else {
-                    self.set_state(ServiceState::Starting);
-                }
-                }
-                None => {
-                    if shutdown_flag.load(Ordering::SeqCst) {
-                        break;
-                    }
-                }
+            if is_tty && user_logged_in {
+                self.set_state(ServiceState::Stopped);
+            } else {
+                let _ = self.start(); // Restart if allowed
             }
-
-            thread::sleep(Duration::from_millis(300));
         }
 
-        self.shutdown()?;
-        Ok(())
+        thread::sleep(Duration::from_millis(300));
     }
+
+    self.shutdown()?;
+    Ok(())
+}
 }
 
