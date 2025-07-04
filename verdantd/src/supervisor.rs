@@ -193,49 +193,18 @@ impl Supervisor {
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
             }
+            let logged_in = self.is_tty_logged_in();
 
-            if self.service.name.starts_with("tty@") {
-                if self.is_tty_logged_in() {
-                    break;
-                } else {
-                    if !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
-                        break;
-                    }
-                }
-            } else {
-                if  !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
-                    break;
-                }
+            if self.service.name.starts_with("tty@") && logged_in {
+                self.set_state(ServiceState::Stopped);
+
+                thread::sleep(Duration::from_secs(1));
+                continue;
             }
 
             match self.child_has_exited() {
                 Some(true) => {
                     if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
-                        break;
-                    }
-
-                    if self.service.name.starts_with("tty@") {
-                        if matches!(self.service.restart, RestartPolicy::Always) {
-                            loop {
-                                if shutdown_flag.load(Ordering::SeqCst) {
-                                    break;
-                                }
-
-                                if !self.is_tty_logged_in() {
-                                    let _ = self.start();
-                                    break;
-                                }
-
-                                thread::sleep(Duration::from_secs(1));
-                            }
-                        } else {
-                            break;
-                        }
-                    } else if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
-                        thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
-                        let _ = self.start();
-                    }
-                    else {
                         break;
                     }
                 }
