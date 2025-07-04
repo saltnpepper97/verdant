@@ -190,6 +190,8 @@ impl Supervisor {
             self.start()?;
         }
 
+        let mut was_logged_in = self.is_tty_logged_in();
+
         loop {
             if shutdown_flag.load(Ordering::SeqCst) {
                 break;
@@ -203,76 +205,42 @@ impl Supervisor {
                         break;
                     }
 
-                    match self.service.restart {
-                        RestartPolicy::Always => {
-                            if self.service.name.starts_with("tty@") {
-                                if !logged_in {
-                                    {
-                                        let mut file = self.file_logger.lock().unwrap();
-                                        file.log(LogLevel::Info, &format!(
-                                            "User logged out of '{}', restarting tty service",
-                                            self.service.name
-                                        ));
-                                    }
-                                    if let Err(e) = self.start() {
-                                        {
-                                            let mut file = self.file_logger.lock().unwrap();
-                                            file.log(LogLevel::Fail, &format!(
-                                                "Failed to restart '{}': {}",
-                                                self.service.name, e
-                                            ));
-                                        }
-                                        self.set_state(ServiceState::Failed);
-                                        thread::sleep(Duration::from_secs(1));
-                                    }
-                                } else {
-                                    self.set_state(ServiceState::Stopped);
-                                }
-                            } else {
-                                {
-                                    let mut file = self.file_logger.lock().unwrap();
-                                    file.log(LogLevel::Info, &format!("Restarting '{}'", self.service.name));
-                                }
-                                if let Err(e) = self.start() {
-                                    {
-                                        let mut file = self.file_logger.lock().unwrap();
-                                        file.log(LogLevel::Fail, &format!(
-                                            "Failed to restart '{}': {}",
-                                            self.service.name, e
-                                        ));
-                                    }
-                                    self.set_state(ServiceState::Failed);
-                                    thread::sleep(Duration::from_secs(1));
-                                }
+                    if self.service.name.starts_with("tty@") {
+                        if !logged_in {
+                            {
+                                let mut file = self.file_logger.lock().unwrap();
+                                file.log(LogLevel::Info, &format!(
+                                    "TTY '{}' exited and user logged out, restarting",
+                                    self.service.name
+                                ));
                             }
-                        }
 
-                        RestartPolicy::OnFailure => {
-                            if self.state == ServiceState::Failed {
+                            if let Err(e) = self.start() {
                                 {
                                     let mut file = self.file_logger.lock().unwrap();
-                                    file.log(LogLevel::Info, &format!(
-                                        "Restarting failed service '{}'",
-                                        self.service.name
+                                    file.log(LogLevel::Fail, &format!(
+                                        "Failed to restart '{}': {}",
+                                        self.service.name, e
                                     ));
                                 }
-                                if let Err(e) = self.start() {
-                                    {
-                                        let mut file = self.file_logger.lock().unwrap();
-                                        file.log(LogLevel::Fail, &format!(
-                                            "Failed to restart '{}': {}",
-                                            self.service.name, e
-                                        ));
-                                    }
-                                    self.set_state(ServiceState::Failed);
-                                    thread::sleep(Duration::from_secs(1));
-                                }
-                            } else {
-                                break;
+                                self.set_state(ServiceState::Failed);
+                                thread::sleep(Duration::from_secs(1));
                             }
+                        } else {
+                            self.set_state(ServiceState::Stopped);
                         }
-
-                        RestartPolicy::Never => break,
+                    } else {
+                        if let Err(e) = self.start() {
+                            {
+                                let mut file = self.file_logger.lock().unwrap();
+                                file.log(LogLevel::Fail, &format!(
+                                    "Failed to restart '{}': {}",
+                                    self.service.name, e
+                                ));
+                            }
+                            self.set_state(ServiceState::Failed);
+                            thread::sleep(Duration::from_secs(1));
+                        }
                     }
                 }
 
@@ -280,13 +248,37 @@ impl Supervisor {
                     self.set_state(ServiceState::Running);
                 }
 
-                None => {
-                    if shutdown_flag.load(Ordering::SeqCst) {
-                        break;
+                None => {}
+            }
+
+            if self.child.is_none()
+                && self.service.name.starts_with("tty@")
+                && self.service.restart == RestartPolicy::Always
+                && !logged_in
+                && was_logged_in
+            {
+                {
+                    let mut file = self.file_logger.lock().unwrap();
+                    file.log(LogLevel::Info, &format!(
+                        "User logged out of '{}', restarting tty service",
+                        self.service.name
+                    ));
+                }
+
+                if let Err(e) = self.start() {
+                    {
+                        let mut file = self.file_logger.lock().unwrap();
+                        file.log(LogLevel::Fail, &format!(
+                            "Failed to restart '{}': {}",
+                            self.service.name, e
+                        ));
                     }
+                    self.set_state(ServiceState::Failed);
+                    thread::sleep(Duration::from_secs(1));
                 }
             }
 
+            was_logged_in = logged_in;
             thread::sleep(Duration::from_millis(300));
         }
 
