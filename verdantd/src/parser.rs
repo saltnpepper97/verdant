@@ -1,166 +1,157 @@
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufRead, BufReader, stdout, stderr};
 
+use crate::service::{Service, StartupPackage, RestartPolicy};
+use bloom::status::ServiceState;
 use bloom::errors::BloomError;
-use bloom::log::{ConsoleLogger, FileLogger};
-use bloom::status::LogLevel;
-use bloom::time::ProcessTimer;
 
-use crate::service_file::{ServiceFile, RestartPolicy};
+fn parse_quoted_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = s.chars().peekable();
+    let mut in_double_quotes = false;
+    let mut in_single_quotes = false;
 
-/// Replace each `{}` in the content with the instance string
-fn apply_template(content: &str, instance: Option<&str>) -> String {
-    if let Some(id) = instance {
-        content.replace("{}", id)
-    } else {
-        content.to_string()
+    while let Some(&ch) = chars.peek() {
+        match ch {
+            '"' if !in_single_quotes => {
+                chars.next();
+                if in_double_quotes {
+                    in_double_quotes = false;
+                    args.push(current.clone());
+                    current.clear();
+                } else {
+                    in_double_quotes = true;
+                }
+            }
+            '\'' if !in_double_quotes => {
+                chars.next();
+                if in_single_quotes {
+                    in_single_quotes = false;
+                    args.push(current.clone());
+                    current.clear();
+                } else {
+                    in_single_quotes = true;
+                }
+            }
+            ch if ch.is_whitespace() && !in_double_quotes && !in_single_quotes => {
+                chars.next();
+                if !current.is_empty() {
+                    args.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(ch);
+                chars.next();
+            }
+        }
     }
+
+    if !current.is_empty() {
+        args.push(current);
+    }
+
+    args
 }
 
-/// Parse .vs service file at `path`, applying `{}` template substitution if `instance` is Some
-pub fn parse_service_file(
-    path: &Path,
-    instance: Option<&str>,
-    console_logger: &mut dyn ConsoleLogger,
-    file_logger: &mut dyn FileLogger,
-) -> Result<ServiceFile, BloomError> {
-    let timer = ProcessTimer::start();
+pub fn parse_service_file(path: &str) -> Result<Vec<Service>, BloomError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
 
-    let raw_content = fs::read_to_string(path).map_err(BloomError::Io)?;
-    let content = apply_template(&raw_content, instance);
-    let reader = BufReader::new(content.as_bytes());
+    let mut name = None;
+    let mut desc = None;
+    let mut cmd = None;
+    let mut args = Vec::new();
+    let mut startup = None;
+    let mut restart = None;
+    let mut tags = Vec::new();
+    let mut instances = Vec::new();
+    let mut stdout: Option<String> = None;
+    let mut stderr: Option<String> = None;
+    let mut in_instance_block = false;
 
-    let mut service = ServiceFile::new(String::new(), String::new());
-    let mut current_key: Option<String> = None;
-
-    for line_res in reader.lines() {
-        let line = line_res.map_err(BloomError::Io)?;
-        let line = line.trim_end();
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
 
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
-        if line.starts_with("  ") || line.starts_with('\t') {
-            if let Some(ref key) = current_key {
-                let val = line.trim_start_matches(|c: char| c == '-' || c.is_whitespace()).trim_end();
-                match key.as_str() {
-                    "env" => {
-                        service.env.get_or_insert(Vec::new()).push(val.to_string());
-                    }
-                    "dependencies" => {
-                        service.dependencies.get_or_insert(Vec::new()).push(val.to_string());
-                    }
-                    "tags" => {
-                        service.tags.get_or_insert(Vec::new()).push(val.to_string());
-                    }
-                    "instances" => {
-                        service.instances.get_or_insert(Vec::new()).push(val.to_string());
-                    }
-                    _ => {}
+        if line.starts_with("instances:") {
+            in_instance_block = true;
+            continue;
+        }
+
+        if in_instance_block {
+            if line.starts_with('-') {
+                let value = line.trim_start_matches('-').trim().to_string();
+                if !value.is_empty() {
+                    instances.push(value);
                 }
                 continue;
             } else {
-                continue;
+                in_instance_block = false;
             }
         }
 
         if let Some((key, val)) = line.split_once(':') {
             let key = key.trim();
             let val = val.trim();
-            current_key = Some(key.to_string());
 
             match key {
-                "name" => service.name = val.to_string(),
-                "desc" => service.desc = if val.is_empty() { None } else { Some(val.to_string()) },
-                "cmd" => service.cmd = val.to_string(),
-                "args" => {
-                    service.args = if val.is_empty() {
-                        None
-                    } else {
-                        Some(val.split_whitespace().map(|s| s.to_string()).collect())
-                    };
-                }
-                "pre-cmd" => service.pre_cmd = if val.is_empty() { None } else { Some(val.to_string()) },
-                "post-cmd" => service.post_cmd = if val.is_empty() { None } else { Some(val.to_string()) },
-                "package" => service.package = if val.is_empty() { None } else { Some(val.to_string()) },
-                "startup-package" => service.startup_package = if val.is_empty() { None } else { Some(val.to_string()) },
-                "user" => service.user = if val.is_empty() { None } else { Some(val.to_string()) },
-                "group" => service.group = if val.is_empty() { None } else { Some(val.to_string()) },
-                "working-dir" => service.working_dir = if val.is_empty() { None } else { Some(val.to_string()) },
-                "restart" => {
-                    service.restart = match val {
-                        "on-failure" => RestartPolicy::OnFailure,
-                        "always" => RestartPolicy::Always,
-                        _ => RestartPolicy::Never,
-                    };
-                }
-                "restart-delay" => {
-                    service.restart_delay = val.parse().ok();
-                }
-                "stop-cmd" => service.stop_cmd = if val.is_empty() { None } else { Some(val.to_string()) },
-                "timeout-start" => {
-                    service.timeout_start = val.parse().ok();
-                }
-                "timeout-stop" => {
-                    service.timeout_stop = val.parse().ok();
-                }
-                "priority" => {
-                    service.priority = val.parse().ok();
-                }
-                "stdout-log" => service.stdout_log = if val.is_empty() { None } else { Some(val.to_string()) },
-                "stderr-log" => service.stderr_log = if val.is_empty() { None } else { Some(val.to_string()) },
-                "umask" => service.umask = if val.is_empty() { None } else { Some(val.to_string()) },
-                "nice" => {
-                    service.nice = val.parse().ok();
-                }
-                "env" => { service.env = Some(Vec::new()); }
-                "dependencies" => { service.dependencies = Some(Vec::new()); }
-                "tags" => { service.tags = Some(Vec::new()); }
-                "instances" => { service.instances = Some(Vec::new()); }  // <-- Added here
-                _ => {}
+                "name" => name = Some(val.to_string()),
+                "desc" => desc = Some(val.to_string()),
+                "cmd" => cmd = Some(val.to_string()),
+                "args" => args = parse_quoted_args(val),
+                "startup" => startup = StartupPackage::from_str(val),
+                "restart" => restart = RestartPolicy::from_str(val),
+                "tags" => tags = val.split(',').map(|s| s.trim().to_string()).collect(),
+                "stdout" => stdout = Some(val.to_string()),
+                "stderr" => stderr = Some(val.to_string()),
+
+                _ => return Err(BloomError::Parse(format!("Unknown key: {key}"))),
             }
         }
     }
 
-    if service.name.is_empty() {
-        let msg = format!("Service file {:?} missing required 'name'", path);
-        log_error(console_logger, file_logger, &timer, LogLevel::Fail, &msg);
-        return Err(BloomError::Custom(msg));
-    }
+    let name = name.ok_or_else(|| BloomError::Parse("Missing name".into()))?;
+    let cmd = cmd.ok_or_else(|| BloomError::Parse("Missing cmd".into()))?;
 
-    if service.cmd.is_empty() {
-        let msg = format!("Service file {:?} missing required 'cmd'", path);
-        log_error(console_logger, file_logger, &timer, LogLevel::Fail, &msg);
-        return Err(BloomError::Custom(msg));
-    }
+    let base = Service {
+        name,
+        desc: desc.unwrap_or_default(),
+        cmd,
+        args,
+        startup: startup.unwrap_or(StartupPackage::Custom),
+        restart: restart.unwrap_or(RestartPolicy::Never),
+        tags,
+        instances: vec![],
+        state: ServiceState::Stopped,
+        stdout,
+        stderr,
+    };
 
-    if service.restart_delay.is_none() { service.restart_delay = Some(0); }
-    if service.timeout_start.is_none() { service.timeout_start = Some(10); }
-    if service.timeout_stop.is_none() { service.timeout_stop = Some(5); }
-    if service.umask.is_none() { service.umask = Some("022".to_string()); }
-    if service.nice.is_none() { service.nice = Some(0); }
-    if service.priority.is_none() { service.priority = Some(50); }
-    if service.stdout_log.is_none() {
-        service.stdout_log = Some(format!("/var/log/verdant/services/{}.out.log", service.name));
+    // If instances were defined, create one service per instance with `{}` replaced
+    if !instances.is_empty() {
+        let mut expanded = Vec::new();
+        for inst in instances {
+            let svc = Service {
+                name: base.name.replace("{}", &inst),
+                desc: base.desc.replace("{}", &inst),
+                cmd: base.cmd.replace("{}", &inst),
+                args: base.args.iter().map(|a| a.replace("{}", &inst)).collect(),
+                stdout: base.stdout.as_ref().map(|s| s.replace("{}", &inst)),
+                stderr: base.stderr.as_ref().map(|s| s.replace("{}", &inst)),
+                instances: vec![inst.clone()],
+                ..base.clone()
+            };
+            expanded.push(svc);
+        }
+        Ok(expanded)
+    } else {
+        Ok(vec![base])
     }
-    if service.stderr_log.is_none() {
-        service.stderr_log = Some(format!("/var/log/verdant/services/{}.err.log", service.name));
-    }
-
-    Ok(service)
-}
-
-fn log_error(
-    console_logger: &mut dyn ConsoleLogger,
-    file_logger: &mut dyn FileLogger,
-    timer: &ProcessTimer,
-    level: LogLevel,
-    msg: &str,
-) {
-    let elapsed = timer.elapsed();
-    console_logger.message(level, msg, elapsed);
-    file_logger.log(level, msg);
 }
 

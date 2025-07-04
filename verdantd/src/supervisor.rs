@@ -1,262 +1,101 @@
-use std::fs;
-use std::path::Path;
-use std::process::Child;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::thread::sleep;
+use std::time::Duration;
 
+use bloom::status::ServiceState;
 use bloom::errors::BloomError;
-use bloom::log::{ConsoleLogger, FileLogger};
-use bloom::status::{LogLevel, ServiceState};
 
-use crate::process::{start_service, stop_service};
-use crate::service_file::{RestartPolicy, ServiceFile};
+use crate::service::Service;
+use crate::control::{ServiceHandle, start_service, stop_service, restart_service};
 
 pub struct Supervisor {
-    pub service: ServiceFile,
-    pub child: Option<Child>,
-    pub restart_count: u32,
-    pub last_start: Option<Instant>,
-    pub state: ServiceState,
-
-    console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
-    file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>>,
-
-    restarting: bool,
-}
-
-enum ExitResult {
-    StillRunning,
-    ExitedOk,
-    ExitedFailed,
+    pub service: Service,
+    pub handle: Option<ServiceHandle>,
 }
 
 impl Supervisor {
-    pub fn new(
-        service: ServiceFile,
-        console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
-        file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>>,
-    ) -> Self {
+    pub fn new(service: Service) -> Self {
         Self {
             service,
-            child: None,
-            restart_count: 0,
-            last_start: None,
-            state: ServiceState::Stopped,
-            console_logger,
-            file_logger,
-            restarting: false,
+            handle: None,
         }
     }
 
+    /// Start the service if not already running.
     pub fn start(&mut self) -> Result<(), BloomError> {
-        if self.child.is_some() {
-            return Err(BloomError::Custom(format!("Service '{}' already running", self.service.name)));
-        }
-
-        self.set_state(ServiceState::Starting);
-
-        let launch = {
-            let mut file = self.file_logger.lock().unwrap();
-            start_service(&self.service, &mut *file)?
-        };
-
-        self.child = Some(launch.child);
-        self.last_start = Some(launch.start_time);
-        self.restart_count = 0;
-        self.restarting = false;
-
-        self.set_state(ServiceState::Running);
-        Ok(())
-    }
-
-    pub fn stop(&mut self) -> Result<(), BloomError> {
-        self.set_state(ServiceState::Stopping);
-
-        if let Some(child) = self.child.take() {
-            let pid = child.id();
-            let mut con = self.console_logger.lock().unwrap();
-            let mut file = self.file_logger.lock().unwrap();
-
-            if let Err(e) = stop_service(&self.service, pid, &mut *con, &mut *file) {
-                let err_msg = format!("Error stopping service '{}': {}", self.service.name, e);
-                con.message(LogLevel::Warn, &err_msg, Duration::ZERO);
-                file.log(LogLevel::Warn, &err_msg);
-            }
-        }
-
-        self.set_state(ServiceState::Stopped);
-        Ok(())
-    }
-
-    pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
-            {
-                let mut file = self.file_logger.lock().unwrap();
-                file.log(LogLevel::Info, &format!("Skipping stop for logged-in '{}'", self.service.name));
-            }
-            self.set_state(ServiceState::Stopped);
+        if self.handle.is_some() {
+            // Already running
             return Ok(());
         }
 
-        let result = self.stop();
-        let mut file = self.file_logger.lock().unwrap();
-        match &result {
-            Ok(_) => file.log(LogLevel::Info, &format!("Supervisor shutdown: '{}'", self.service.name)),
-            Err(e) => file.log(LogLevel::Fail, &format!("Shutdown failed for '{}': {}", self.service.name, e)),
-        }
-        result
+        self.service.state = ServiceState::Starting;
+
+        let handle = start_service(&self.service)?;
+        self.handle = Some(handle);
+        self.service.state = ServiceState::Running;
+
+        Ok(())
     }
 
-    fn set_state(&mut self, new_state: ServiceState) {
-        if self.state != new_state {
-            self.state = new_state;
-            let mut file = self.file_logger.lock().unwrap();
-            file.log(LogLevel::Info, &format!("Service '{}' state changed to {:?}", self.service.name, self.state));
-        }
-    }
+    /// Stop the service if running.
+    pub fn stop(&mut self) -> Result<(), BloomError> {
+        if let Some(mut handle) = self.handle.take() {
+            self.service.state = ServiceState::Stopping;
 
-    fn child_exit_status(&mut self) -> ExitResult {
-        if let Some(child) = self.child.as_mut() {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    self.child = None;
-                    if status.success() {
-                        self.set_state(ServiceState::Stopped);
-                        ExitResult::ExitedOk
-                    } else {
-                        self.set_state(ServiceState::Failed);
-                        ExitResult::ExitedFailed
-                    }
-                }
-                Ok(None) => ExitResult::StillRunning,
-                Err(_) => {
-                    self.child = None;
-                    self.set_state(ServiceState::Failed);
-                    ExitResult::ExitedFailed
-                }
-            }
+            // Timeout 5 seconds to stop cleanly
+            let stopped_cleanly = stop_service(&mut handle, Duration::from_secs(5))?;
+
+            self.service.state = if stopped_cleanly {
+                ServiceState::Stopped
+            } else {
+                ServiceState::Failed
+            };
+
+            Ok(())
         } else {
-            ExitResult::ExitedOk
+            // Not running
+            Ok(())
         }
     }
 
-    fn is_tty_logged_in(&self) -> bool {
-        if !self.service.name.starts_with("tty@") {
-            return false;
-        }
+    /// Restart the service according to restart policy.
+    pub fn restart(&mut self) -> Result<(), BloomError> {
+        let current_handle = self.handle.take();
+        let new_handle_opt = restart_service(&self.service, current_handle)?;
 
-        let tty_instance = self.service.name.split('@').nth(1).unwrap_or("");
-        if tty_instance.is_empty() {
-            return false;
-        }
-
-        let tty_path = format!("/dev/{}", tty_instance);
-        let proc_dir_iter = match fs::read_dir("/proc") {
-            Ok(d) => d,
-            Err(_) => return false,
+        self.handle = new_handle_opt;
+        self.service.state = if self.handle.is_some() {
+            ServiceState::Running
+        } else {
+            ServiceState::Stopped
         };
 
-        for entry in proc_dir_iter.flatten() {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            let pid: u32 = match file_name.parse() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-
-            let fd_dir_path = format!("/proc/{}/fd", pid);
-            let fd_dir = match fs::read_dir(fd_dir_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-
-            for fd_entry in fd_dir.flatten() {
-                if let Ok(link_target) = fs::read_link(fd_entry.path()) {
-                    if link_target == Path::new(&tty_path) {
-                        let comm_path = format!("/proc/{}/comm", pid);
-                        if let Ok(comm) = fs::read_to_string(&comm_path) {
-                            let proc_name = comm.trim();
-                            if proc_name != "getty" && proc_name != "agetty" {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        false
+        Ok(())
     }
 
+    /// Main supervise loop.
+    /// Checks the service status periodically and restarts if necessary.
+    /// Will exit cleanly when `running` is set to false.
+    pub fn supervise_loop(&mut self, running: Arc<AtomicBool>) -> Result<(), BloomError> {
+        while running.load(Ordering::Relaxed) {
+            if let Some(handle) = &mut self.handle {
+                if !handle.is_running() {
+                    // Process exited unexpectedly
+                    self.service.state = ServiceState::Failed;
 
-pub fn supervise_loop(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-    // Immediately start if not already
-    if self.child.is_none() {
-        self.start()?;
-    }
-
-    let is_tty = self.service.name.starts_with("tty@");
-
-    loop {
-        if shutdown_flag.load(Ordering::SeqCst) {
-            break;
-        }
-
-        let exit_status = self.child_exit_status();
-        let mut user_logged_in = false;
-        if is_tty {
-            user_logged_in = self.is_tty_logged_in();
-        }
-
-        match exit_status {
-            ExitResult::StillRunning => {
-                if is_tty && user_logged_in {
-                    // Enforce "stopped" state even while running under login
-                    self.set_state(ServiceState::Stopped);
-                } else {
-                    self.set_state(ServiceState::Running);
+                    // Attempt restart based on policy
+                    self.restart()?;
                 }
+            } else {
+                // Not running; try to start
+                self.start()?;
             }
 
-            ExitResult::ExitedOk | ExitResult::ExitedFailed => {
-                let exited_clean = matches!(exit_status, ExitResult::ExitedOk);
-                let should_restart = match self.service.restart {
-                    RestartPolicy::Always => true,
-                    RestartPolicy::OnFailure => !exited_clean,
-                    RestartPolicy::Never => false,
-                };
-
-                if !should_restart {
-                    self.set_state(if exited_clean { ServiceState::Stopped } else { ServiceState::Failed });
-                    break;
-                }
-
-                if is_tty && user_logged_in {
-                    self.set_state(ServiceState::Stopped);
-                    {
-                        let mut log = self.file_logger.lock().unwrap();
-                        log.log(LogLevel::Info,
-                            &format!("'{}' exited; waiting for tty logout before restart", self.service.name));
-                    }
-                    // WAIT until logout
-                    while !shutdown_flag.load(Ordering::SeqCst) && self.is_tty_logged_in() {
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    if shutdown_flag.load(Ordering::SeqCst) {
-                        break;
-                    }
-                }
-
-                // Now safe to restart
-                let _ = self.start();
-            }
+            sleep(Duration::from_secs(2));
         }
-        thread::sleep(Duration::from_millis(300));
+
+        Ok(())
     }
-
-    self.shutdown()?;
-    Ok(())
-}
-
 }
 

@@ -1,181 +1,123 @@
-use std::collections::{HashMap, HashSet};
+use std::thread;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bloom::errors::BloomError;
-use bloom::log::{ConsoleLogger, FileLogger};
-use bloom::status::LogLevel;
+use bloom::log::{FileLogger, ConsoleLogger};
 
-use crate::service_file::ServiceFile;
+use crate::loader::load_services;
 use crate::supervisor::Supervisor;
+use crate::shutdown;
 
-/// Manages all supervisors and their threads
-pub struct ServiceManager {
-    supervisors: HashMap<String, Arc<Mutex<Supervisor>>>,
-    handles: HashMap<String, JoinHandle<()>>,
-
-    console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
-    file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>>,
+pub struct Manager {
+    supervisors: Vec<Arc<Mutex<Supervisor>>>,
+    running: Arc<AtomicBool>,
 }
 
-impl ServiceManager {
-    pub fn new(
-        console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
-        file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>>,
-    ) -> Self {
+impl Manager {
+    /// Takes both file logger and console logger.
+    pub fn new(logger: &mut dyn FileLogger) -> Self {
+        let (services, _loaded_count, _failed_count) = load_services(logger);
+
+        let supervisors = services
+            .into_iter()
+            .map(|service| Arc::new(Mutex::new(Supervisor::new(service))))
+            .collect();
+
         Self {
-            supervisors: HashMap::new(),
-            handles: HashMap::new(),
-            console_logger,
-            file_logger,
+            supervisors,
+            running: Arc::new(AtomicBool::new(true)),
         }
     }
 
-    /// Add service by creating a Supervisor
-    pub fn add_service(&mut self, service: ServiceFile) -> Result<(), BloomError> {
-        if self.supervisors.contains_key(&service.name) {
-            return Err(BloomError::Custom(format!("Service '{}' already added", service.name)));
-        }
+    /// Starts supervising all services concurrently.
+    pub fn start_all(&self) {
+        let running = self.running.clone();
 
-        let supervisor = Supervisor::new(
-            service,
-            Arc::clone(&self.console_logger),
-            Arc::clone(&self.file_logger),
-        );
+        for supervisor in &self.supervisors {
+            let sup = supervisor.clone();
+            let running = running.clone();
 
-        self.supervisors.insert(supervisor.service.name.clone(), Arc::new(Mutex::new(supervisor)));
+            thread::spawn(move || {
+                let mut sup = sup.lock().unwrap();
 
-        Ok(())
-    }
-
-    /// Start all services that have a startup_package defined
-    pub fn start_startup_services(&mut self) -> Result<(), BloomError> {
-        let mut started_count = 0;
-        let mut startup_packages = HashSet::new();
-
-        // Silence unused variable warning by prefixing with underscore
-        for (_name, supervisor_mutex) in &self.supervisors {
-            let mut supervisor = supervisor_mutex.lock().unwrap();
-            if supervisor.service.startup_package.is_some() {
-                supervisor.start()?;
-                started_count += 1;
-                if let Some(pkg) = &supervisor.service.startup_package {
-                    startup_packages.insert(pkg.clone());
-                }
-            }
-        }
-
-        {
-            let mut con = self.console_logger.lock().unwrap();
-            let mut file = self.file_logger.lock().unwrap();
-
-            if started_count > 0 {
-                for (name, supervisor_mutex) in &self.supervisors {
-                    let supervisor = supervisor_mutex.lock().unwrap();
-                    if let Some(pkg) = &supervisor.service.startup_package {
-                        let msg = format!("Started service '{}' with startup package '{}'", name, pkg);
-                        con.message(LogLevel::Info, &msg, std::time::Duration::ZERO);
-                        file.log(LogLevel::Info, &msg);
+                // Run the supervise loop until manager is stopped
+                while running.load(Ordering::Relaxed) {
+                    if let Err(e) = sup.supervise_loop(running.clone()) {
+                        eprintln!("Supervisor error for {}: {:?}", sup.service.name, e);
                     }
                 }
 
-                let mut packages: Vec<_> = startup_packages.into_iter().collect();
-                packages.sort();
-                let summary_msg = format!(
-                    "Started {} service(s) with startup package(s): {}",
-                    started_count,
-                    packages.join(", ")
-                );
-                file.log(LogLevel::Info, &summary_msg);
-            } else {
-                let msg = "No startup packages found";
-                con.message(LogLevel::Warn, msg, std::time::Duration::ZERO);
-                file.log(LogLevel::Warn, msg);
-            }
+                // On exit, ensure service is stopped cleanly
+                let _ = sup.stop();
+            });
         }
-
-        Ok(())
     }
 
-    /// Start a single service by name
-    pub fn start_service(&self, name: &str) -> Result<(), BloomError> {
-        let supervisor_mutex = self.supervisors.get(name)
-            .ok_or_else(|| BloomError::Custom(format!("Service '{}' not found", name)))?;
+    /// Starts only services whose startup package matches one in `allowed_startups`.
+    /// Logs to both file and console loggers.
+    pub fn start_startup_services(
+        &self,
+        allowed_startups: &[&str],
+        file_logger: &mut dyn FileLogger,
+        console_logger: &mut dyn ConsoleLogger,
+    ) {
+        let running = self.running.clone();
 
-        let mut supervisor = supervisor_mutex.lock().unwrap();
-        supervisor.start()
-    }
+        let mut matched_count = 0;
 
-    /// Stop a single service by name
-    pub fn stop_service(&self, name: &str) -> Result<(), BloomError> {
-        let supervisor_mutex = self.supervisors.get(name)
-            .ok_or_else(|| BloomError::Custom(format!("Service '{}' not found", name)))?;
+        for supervisor in &self.supervisors {
+            let sup = supervisor.clone();
+            let startup_str = sup.lock().unwrap().service.startup.as_str();
 
-        let mut supervisor = supervisor_mutex.lock().unwrap();
-        supervisor.stop()
-    }
+            if allowed_startups.contains(&startup_str) {
+                matched_count += 1;
 
-    /// Spawn supervisor threads for all services and store JoinHandles
-    pub fn supervise_all(&mut self, shutdown_flag: Arc<AtomicBool>) -> Result<(), BloomError> {
-        for (name, supervisor_mutex) in &self.supervisors {
-            if self.handles.contains_key(name) {
-                continue; // Already spawned
-            }
+                // Log the matched service startup package to both loggers
+                let msg = format!("Starting service '{}' in startup package '{}'", sup.lock().unwrap().service.name, startup_str);
+                file_logger.log(bloom::status::LogLevel::Info, &msg);
+                console_logger.message(bloom::status::LogLevel::Info, &msg, std::time::Duration::from_secs(0));
 
-            let supervisor_mutex = Arc::clone(supervisor_mutex);
-            let shutdown_flag = Arc::clone(&shutdown_flag);
+                let running = running.clone();
+                thread::spawn(move || {
+                    let mut sup = sup.lock().unwrap();
 
-            // Clone twice: once for closure move, once for insert
-            let name_clone_for_thread = name.clone();
-            let name_clone_for_insert = name.clone();
-
-            let handle = thread::Builder::new()
-                .name(format!("supervisor-{}", name_clone_for_thread))
-                .spawn(move || {
-                    let mut supervisor = supervisor_mutex.lock().unwrap();
-                    if let Err(e) = supervisor.supervise_loop(shutdown_flag) {
-                        eprintln!("Supervisor for '{}' exited with error: {:?}", name_clone_for_thread, e);
+                    while running.load(Ordering::Relaxed) {
+                        if let Err(e) = sup.supervise_loop(running.clone()) {
+                            eprintln!("Supervisor error for {}: {:?}", sup.service.name, e);
+                        }
                     }
-                })?;
 
-            self.handles.insert(name_clone_for_insert, handle);
-        }
-        Ok(())
-    }
-
-    /// Shutdown all supervisors and join their threads
-    pub fn shutdown(&mut self) -> Result<(), BloomError> {
-        if self.supervisors.is_empty() {
-            let mut file = self.file_logger.lock().unwrap();
-            file.log(LogLevel::Warn, "Shutdown requested but no services to stop");
-        } else {
-            for supervisor_mutex in self.supervisors.values() {
-                let mut supervisor = supervisor_mutex.lock().unwrap();
-                if let Err(e) = supervisor.shutdown() {
-                    let mut file = self.file_logger.lock().unwrap();
-                    file.log(LogLevel::Fail, &format!("Failed to shutdown service '{}': {}", supervisor.service.name, e));
-                }
+                    let _ = sup.stop();
+                });
             }
         }
 
-        // Join all threads
-        for (name, handle) in self.handles.drain() {
-            if let Err(e) = handle.join() {
-                let mut file = self.file_logger.lock().unwrap();
-                file.log(LogLevel::Fail, &format!("Failed to join thread '{}': {:?}", name, e));
+        if matched_count == 0 {
+            for startup in allowed_startups {
+                let msg = format!("No services found for startup package '{}'", startup);
+                file_logger.log(bloom::status::LogLevel::Warn, &msg);
+                console_logger.message(bloom::status::LogLevel::Warn, &msg, std::time::Duration::from_secs(0));
             }
         }
-
-        Ok(())
     }
 
-    pub fn get_console_logger(&self) -> &Arc<Mutex<dyn ConsoleLogger + Send + Sync>> {
-        &self.console_logger
+    /// Stops all supervisors and services cleanly.
+    pub fn stop_all(&self) {
+        self.running.store(false, Ordering::Relaxed);
+
+        for supervisor in &self.supervisors {
+            if let Ok(mut sup) = supervisor.lock() {
+                let _ = sup.stop();
+            }
+        }
     }
 
-    pub fn get_file_logger(&self) -> &Arc<Mutex<dyn FileLogger + Send + Sync>> {
-        &self.file_logger
+    /// Clean shutdown, waits for supervisors to stop and returns errors if any.
+    pub fn shutdown_all_services(&self) -> Result<(), BloomError> {
+        self.running.store(false, Ordering::Relaxed);
+
+        shutdown::shutdown_all(&self.supervisors)
     }
 }
 

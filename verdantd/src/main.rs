@@ -1,107 +1,91 @@
+use std::sync::mpsc::channel;
+use std::thread;
+use std::time::Duration;
+
+mod control;
 mod ipc_server;
 mod loader;
 mod manager;
-mod ordering;
 mod parser;
-mod process;
-mod service_file;
+mod service;
+mod shutdown;
 mod supervisor;
 
-use std::sync::{Arc, Mutex, mpsc};
-use std::sync::atomic::AtomicBool;
-use std::thread;
+use crate::manager::Manager;
+use crate::loader::load_services;
+use crate::ipc_server::run_ipc_server;
 
+use bloom::ipc::{IpcCommand, IpcRequest, IpcTarget, send_ipc_request, INIT_SOCKET_PATH};
 use bloom::log::{ConsoleLogger, ConsoleLoggerImpl, FileLogger, FileLoggerImpl};
 use bloom::status::LogLevel;
 
-use crate::manager::ServiceManager;
-use crate::loader::load_services;
+fn main() {
+    let mut console_logger = ConsoleLoggerImpl::new(LogLevel::Info);
+    let mut file_logger = FileLoggerImpl::new(LogLevel::Info, "/var/log/verdant/verdantd.log");
+    file_logger.initialize(&mut console_logger).expect("Failed to init file logger");
+    console_logger.banner("Starting Verdant Service Manager");
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut console_logger_impl = ConsoleLoggerImpl::new(LogLevel::Info);
-    let mut file_logger_impl = FileLoggerImpl::new(LogLevel::Info, "/var/log/verdant/verdantd.log");
+    // Create the manager
+    let (services, loaded_count, failed_count) = load_services(&mut file_logger);
+    
+    // Log to console
+    console_logger.message(
+        LogLevel::Info,
+        &format!("Service loading complete: {} loaded, {} failed.", loaded_count, failed_count),
+        std::time::Duration::ZERO,
+    );
+   
+    let manager = Manager::new(&mut file_logger);
+    // Start only the "base" and "network" startup package services
+    manager.start_startup_services(&["base", "network"], &mut file_logger, &mut console_logger);
 
-    let version = env!("CARGO_PKG_VERSION");
-    console_logger_impl.banner(&format!(
-        "Verdant Service Manager v{} - Cultivating System Harmony",
-        version
-    ));
-    let _ = file_logger_impl.initialize(&mut console_logger_impl);
+    // Set up channel to receive shutdown/reboot commands from IPC server
+    let (shutdown_tx, shutdown_rx) = channel::<IpcCommand>();
 
-    let console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>> =
-        Arc::new(Mutex::new(console_logger_impl));
-    let file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>> =
-        Arc::new(Mutex::new(file_logger_impl));
-
-    let manager = Arc::new(Mutex::new(ServiceManager::new(
-        console_logger.clone(),
-        file_logger.clone(),
-    )));
-
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-
-    {
-        let mut con = console_logger.lock().unwrap();
-        let mut file = file_logger.lock().unwrap();
-
-        let services = load_services(&mut *con, &mut *file)?;
-
-        let mut mgr = manager.lock().unwrap();
-        for service in services {
-            mgr.add_service(service)?;
-        }
-    }
-
-    {
-        let mut mgr = manager.lock().unwrap();
-        mgr.start_startup_services()?;
-        mgr.supervise_all(Arc::clone(&shutdown_flag))?;
-    }
-
-
-    // Clone for IPC server
-    let ipc_manager = Arc::clone(&manager);
-    let ipc_shutdown_flag = Arc::clone(&shutdown_flag);
-
-
-    let (ipc_ready_tx, ipc_ready_rx) = mpsc::channel();
-    let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
-    let shutdown_done_tx = Arc::new(Mutex::new(Some(shutdown_done_tx)));
-
+    // Spawn IPC server in a background thread, passing sender side of channel
+    let ipc_shutdown_tx = shutdown_tx.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc_server::run_ipc_server(ipc_manager, ipc_shutdown_flag, Some(ipc_ready_tx), Some(shutdown_done_tx)) {
-            eprintln!("IPC server error: {}", e);
+        if let Err(e) = run_ipc_server(ipc_shutdown_tx) {
+            eprintln!("IPC server failed: {}", e);
         }
     });
 
-    // wait for ipc server to signal readiness before printing banner
-    ipc_ready_rx.recv().expect("Failed to receive IPC ready signal");
+    // Main event loop, waits for shutdown or reboot commands
+    loop {
+        if let Ok(command) = shutdown_rx.recv() {
+            match command {
+                IpcCommand::Shutdown | IpcCommand::Reboot => {
+                    console_logger.message(LogLevel::Info, "Shutting down all services...", Duration::ZERO);
 
-    {
-        let banner = "\nBoot process complete. Breathe in. Log in.";
-        let mut con = console_logger.lock().unwrap();
-        con.banner(banner);
-    }
+                    // Use references directly instead of trying to extract owned supervisors
+                    match manager.shutdown_all_services() {
+                        Ok(_) => {
+                            console_logger.message(LogLevel::Ok, "All services stopped cleanly.", Duration::ZERO);
+                        }
+                        Err(e) => {
+                            console_logger.message(LogLevel::Fail, &format!("Shutdown error: {e}"), Duration::ZERO);
+                        }
+                    }
 
+                    // Notify init process that shutdown or reboot was requested
+                    let notify = IpcRequest {
+                        target: IpcTarget::Init,
+                        command,
+                    };
 
-    // Wait until shutdown actually completes
-    shutdown_done_rx.recv().expect("Failed to receive shutdown completion signal");
-    
-    // Use console logger to emit clean shutdown log
-    {
-        let mut file = file_logger.lock().unwrap();
-        file.log(LogLevel::Info, "verdantd exiting cleanly.");
-    }
+                    if let Err(e) = send_ipc_request(INIT_SOCKET_PATH, &notify) {
+                        console_logger.message(LogLevel::Fail, &format!("Failed to notify init: {e}"), Duration::ZERO);
+                    }
 
-    let socket_path = bloom::ipc::VERDANTD_SOCKET_PATH;
-    if std::path::Path::new(socket_path).exists() {
-        if let Err(e) = std::fs::remove_file(socket_path) {
-            let mut file = file_logger.lock().unwrap();
-            let msg = format!("Failed to remove verdantd socket: {}", e);
-            file.log(LogLevel::Warn, &msg);
+                    std::process::exit(0);
+                }
+                _ => {
+                    // Ignore other commands
+                }
+            }
         }
+        // Sleep briefly to avoid busy loop if channel is empty
+        thread::sleep(Duration::from_millis(100));
     }
-
-    Ok(())
 }
 

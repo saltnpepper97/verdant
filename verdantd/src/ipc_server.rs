@@ -1,222 +1,44 @@
-use std::fs;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::io::{BufRead, Write};
-use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::mpsc::Sender;
 
-use crate::manager::ServiceManager;
+use bloom::ipc::{IpcCommand, IpcRequest, IpcResponse, serve_ipc_socket, VERDANTD_SOCKET_PATH};
 
-use bloom::ipc::{send_ipc_request, IpcRequest, IpcTarget, IpcCommand, IpcResponse, serialize_response, VERDANTD_SOCKET_PATH, INIT_SOCKET_PATH};
-use bloom::status::LogLevel;
-use serde_json;
-use std::sync::mpsc;
-
-pub fn run_ipc_server(
-    service_manager: Arc<Mutex<ServiceManager>>,
-    shutdown_flag: Arc<AtomicBool>,
-    ready_tx: Option<mpsc::Sender<()>>,
-    shutdown_done_tx: Option<Arc<Mutex<Option<mpsc::Sender<()>>>>>,
-) -> std::io::Result<()> {
-    use std::time::Duration;
-
-    // Clone the logger Arc handles inside the lock guard scope to extend their lifetime
-    let (console_logger, file_logger) = {
-        let sm = service_manager.lock().unwrap();
-        (sm.get_console_logger().clone(), sm.get_file_logger().clone())
-    };
-
-    let socket_path = Path::new(VERDANTD_SOCKET_PATH);
-
-    if let Some(parent) = socket_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
+/// Spawns the IPC server for verdantd. Handles shutdown and reboot commands.
+///
+/// Sends a `Shutdown` or `Reboot` command to the main manager thread via the provided channel.
+pub fn run_ipc_server(shutdown_tx: Sender<IpcCommand>) -> std::io::Result<()> {
+    serve_ipc_socket(VERDANTD_SOCKET_PATH, move |request: IpcRequest| {
+        if request.target != bloom::ipc::IpcTarget::Verdantd {
+            return IpcResponse {
+                success: false,
+                message: "Incorrect target".into(),
+                data: None,
+            };
         }
-    }
 
-    if socket_path.exists() {
-        fs::remove_file(socket_path)?;
-    }
-
-    let listener = UnixListener::bind(socket_path)?;
-
-    {
-        let msg = format!("Verdantd IPC server listening on {}", VERDANTD_SOCKET_PATH);
-        if let Ok(mut con) = console_logger.lock() {
-            con.message(LogLevel::Info, &msg, Duration::ZERO);
-        }
-        if let Ok(mut file) = file_logger.lock() {
-            file.log(LogLevel::Info, &msg);
-        }
-    }
-
-    if let Some(tx) = ready_tx {
-        let _ = tx.send(());
-    }
-
-    for stream_result in listener.incoming() {
-        match stream_result {
-            Ok(mut stream) => {
-                let sm_clone = Arc::clone(&service_manager);
-                let shutdown_tx_clone = shutdown_done_tx.as_ref().map(Arc::clone);
-                if let Err(e) = handle_client(&mut stream, sm_clone, Arc::clone(&shutdown_flag), shutdown_tx_clone) {
-                    let (console_logger, file_logger) = {
-                        let sm = service_manager.lock().unwrap();
-                        (sm.get_console_logger().clone(), sm.get_file_logger().clone())
-                    };
-                    let msg = format!("Error handling IPC client: {}", e);
-                    if let Ok(mut con) = console_logger.lock() {
-                        con.message(LogLevel::Fail, &msg, Duration::ZERO);
-                    }
-                    if let Ok(mut file) = file_logger.lock() {
-                        file.log(LogLevel::Fail, &msg);
-                    }
+        match request.command {
+            IpcCommand::Shutdown | IpcCommand::Reboot => {
+                match shutdown_tx.send(request.command.clone()) {
+                    Ok(_) => IpcResponse {
+                        success: true,
+                        message: format!("Proceeding with {:?}", request.command),
+                        data: None,
+                    },
+                    Err(e) => IpcResponse {
+                        success: false,
+                        message: format!("Failed to trigger shutdown: {}", e),
+                        data: None,
+                    },
                 }
             }
-            Err(e) => {
-                let (console_logger, file_logger) = {
-                    let sm = service_manager.lock().unwrap();
-                    (sm.get_console_logger().clone(), sm.get_file_logger().clone())
-                };
-                let msg = format!("Failed to accept IPC connection: {}", e);
-                if let Ok(mut con) = console_logger.lock() {
-                    con.message(LogLevel::Fail, &msg, Duration::ZERO);
-                }
-                if let Ok(mut file) = file_logger.lock() {
-                    file.log(LogLevel::Fail, &msg);
-                }
-            }
+
+            _ => IpcResponse {
+                success: false,
+                message: format!("Unhandled command: {:?}", request.command),
+                data: None,
+            },
         }
-    }
+    });
 
     Ok(())
-}
-
-fn handle_client(
-    stream: &mut UnixStream,
-    service_manager: Arc<Mutex<ServiceManager>>,
-    shutdown_flag: Arc<AtomicBool>,
-    shutdown_done_tx: Option<Arc<Mutex<Option<mpsc::Sender<()>>>>>
-) -> std::io::Result<()> {
-    use std::io::BufReader;
-    use std::thread;
-    use std::time::Duration;
-
-    let mut buf = Vec::new();
-    let mut reader = BufReader::new(stream.try_clone()?);
-    reader.read_until(b'\n', &mut buf)?;
-
-    let request = match serde_json::from_slice::<IpcRequest>(&buf) {
-        Ok(req) => req,
-        Err(_) => {
-            let resp = IpcResponse {
-                success: false,
-                message: "Invalid IPC request".into(),
-                data: None,
-            };
-            let data = serialize_response(&resp);
-            let _ = stream.write_all(&data);
-            return Ok(());
-        }
-    };
-
-    match request.command {
-        IpcCommand::Shutdown | IpcCommand::Reboot => {
-            let ack = IpcResponse {
-                success: true,
-                message: format!("{:?} initiated", request.command),
-                data: None,
-            };
-            let _ = stream.write_all(&serialize_response(&ack));
-            let _ = stream.flush();
-
-            let sm = Arc::clone(&service_manager);
-            let shutdown_flag_clone = Arc::clone(&shutdown_flag);
-            let cmd = request.command.clone();
-
-            thread::spawn(move || {
-                shutdown_flag_clone.store(true, Ordering::SeqCst);
-
-                let mut sm_guard = match sm.lock() {
-                    Ok(sm) => sm,
-                    Err(_) => return,
-                };
-
-                // Clone logger handles before calling shutdown to avoid simultaneous borrow
-                let console_logger = sm_guard.get_console_logger().clone();
-                let file_logger = sm_guard.get_file_logger().clone();
-
-                let shutdown_result = sm_guard.shutdown();
-
-                match &shutdown_result {
-                    Ok(_) => {
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Info, "All services stopped");
-                        }
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to shutdown services: {}", e);
-                        if let Ok(mut con) = console_logger.lock() {
-                            con.message(LogLevel::Fail, &msg, Duration::ZERO);
-                        }
-                        if let Ok(mut file) = file_logger.lock() {
-                            file.log(LogLevel::Fail, &msg);
-                        }
-                    }
-                }
-
-                let init_request = IpcRequest {
-                    target: IpcTarget::Init,
-                    command: cmd,
-                };
-
-                match send_ipc_request(INIT_SOCKET_PATH, &init_request) {
-                    Ok(response) if response.success => {
-                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
-                            con.message(LogLevel::Info, &format!("Sent shutdown command to init: {}", response.message), Duration::ZERO);
-                        }
-                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
-                            file.log(LogLevel::Info, &format!("Sent shutdown command to init: {}", response.message));
-                        }
-                    }
-                    Ok(response) => {
-                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
-                            con.message(LogLevel::Warn, &format!("Init rejected shutdown command: {}", response.message), Duration::ZERO);
-                        }
-                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
-                            file.log(LogLevel::Warn, &format!("Init rejected shutdown command: {}", response.message));
-                        }
-                    }
-                    Err(e) => {
-                        if let Ok(mut con) = sm.lock().unwrap().get_console_logger().lock() {
-                            con.message(LogLevel::Warn, &format!("Failed to send shutdown command to init: {}", e), Duration::ZERO);
-                        }
-                        if let Ok(mut file) = sm.lock().unwrap().get_file_logger().lock() {
-                            file.log(LogLevel::Warn, &format!("Failed to send shutdown command to init: {}", e));
-                        }
-                    }
-                }
-
-                if let Some(tx_arc) = shutdown_done_tx {
-                    if let Ok(mut opt) = tx_arc.lock() {
-                        if let Some(tx) = opt.take() {
-                            let _ = tx.send(()); // Send only after shutdown finishes!
-                        }
-                    }
-                }
-            });
-
-            Ok(())
-        }
-        _ => {
-            let resp = IpcResponse {
-                success: false,
-                message: "Unsupported command".into(),
-                data: None,
-            };
-            stream.write_all(&serialize_response(&resp))?;
-            Ok(())
-        }
-    }
 }
 
