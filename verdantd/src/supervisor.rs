@@ -85,6 +85,7 @@ impl Supervisor {
     }
 
     pub fn shutdown(&mut self) -> Result<(), BloomError> {
+        // Skip stopping if tty@ and logged in, assume service exits cleanly on shutdown
         if self.service.name.starts_with("tty@") && self.is_tty_logged_in() {
             {
                 let mut file = self.file_logger.lock().unwrap();
@@ -121,14 +122,14 @@ impl Supervisor {
                         Some(true)
                     } else {
                         self.set_state(ServiceState::Failed);
-                        Some(true)
+                        Some(false)
                     }
                 }
                 Ok(None) => Some(false),
                 Err(_) => {
                     self.child = None;
                     self.set_state(ServiceState::Failed);
-                    Some(true)
+                    Some(false)
                 }
             }
         } else {
@@ -154,7 +155,7 @@ impl Supervisor {
 
         for entry in proc_dir_iter.flatten() {
             let file_name = entry.file_name();
-            let file_name_owned = file_name.to_string_lossy().to_string();
+            let file_name_owned = file_name.to_string_lossy().to_string(); // fix for E0716
             let pid: u32 = match file_name_owned.parse() {
                 Ok(n) => n,
                 Err(_) => continue,
@@ -193,16 +194,48 @@ impl Supervisor {
                 break;
             }
 
+            if self.service.name.starts_with("tty@") {
+                if self.is_tty_logged_in() {
+                    break;
+                } else {
+                    if !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                        break;
+                    }
+                }
+            } else {
+                if  !matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                    break;
+                }
+            }
+
             match self.child_has_exited() {
                 Some(true) => {
                     if shutdown_flag.load(Ordering::SeqCst) || self.service.restart == RestartPolicy::Never {
                         break;
                     }
 
-                    if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
+                    if self.service.name.starts_with("tty@") {
+                        if matches!(self.service.restart, RestartPolicy::Always) {
+                            loop {
+                                if shutdown_flag.load(Ordering::SeqCst) {
+                                    break;
+                                }
+
+                                if !self.is_tty_logged_in() {
+                                    let _ = self.start();
+                                    break;
+                                }
+
+                                thread::sleep(Duration::from_secs(1));
+                            }
+                        } else {
+                            break;
+                        }
+                    } else if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
                         thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
-                        self.start()?;
-                    } else {
+                        let _ = self.start();
+                    }
+                    else {
                         break;
                     }
                 }
@@ -216,7 +249,7 @@ impl Supervisor {
 
                     if matches!(self.service.restart, RestartPolicy::Always | RestartPolicy::OnFailure) {
                         thread::sleep(Duration::from_secs(self.service.restart_delay.unwrap_or(1)));
-                        self.start()?;
+                        let _ = self.start();
                     } else {
                         break;
                     }
