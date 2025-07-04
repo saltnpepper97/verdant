@@ -19,15 +19,21 @@ use bloom::ipc::{IpcCommand, IpcRequest, IpcTarget, send_ipc_request, INIT_SOCKE
 use bloom::log::{ConsoleLogger, ConsoleLoggerImpl, FileLogger, FileLoggerImpl};
 use bloom::status::LogLevel;
 
+// Get the Cargo package version set at compile time
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn main() {
     let mut console_logger = ConsoleLoggerImpl::new(LogLevel::Info);
     let mut file_logger = FileLoggerImpl::new(LogLevel::Info, "/var/log/verdant/verdantd.log");
 
+    console_logger.banner(&format!(
+        "Verdantd Service Manager v{} - Cultivating System Harmony",
+        VERSION
+    ));
+
     file_logger
         .initialize(&mut console_logger)
         .expect("Failed to init file logger");
-
-    console_logger.banner("Starting Verdant Service Manager");
 
     let (_services, loaded_count, failed_count) = load_services(&mut file_logger);
 
