@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::process::{Command, Child, ExitStatus};
+use std::process::{Command, Child};
 use std::io;
 use std::time::{Duration, Instant};
 use std::thread::sleep;
@@ -123,7 +123,7 @@ pub fn stop_service(handle: &mut ServiceHandle, timeout: Duration) -> Result<boo
 /// Returns Ok(Some(handle)) if restarted, Ok(None) if not restarted.
 pub fn restart_service(
     service: &Service,
-    mut current_handle: Option<ServiceHandle>,
+    current_handle: Option<ServiceHandle>,
 ) -> Result<Option<ServiceHandle>, BloomError> {
     match service.restart {
         RestartPolicy::Never => {

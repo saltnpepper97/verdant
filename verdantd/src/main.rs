@@ -22,27 +22,26 @@ use bloom::status::LogLevel;
 fn main() {
     let mut console_logger = ConsoleLoggerImpl::new(LogLevel::Info);
     let mut file_logger = FileLoggerImpl::new(LogLevel::Info, "/var/log/verdant/verdantd.log");
-    file_logger.initialize(&mut console_logger).expect("Failed to init file logger");
+
+    file_logger
+        .initialize(&mut console_logger)
+        .expect("Failed to init file logger");
+
     console_logger.banner("Starting Verdant Service Manager");
 
-    // Create the manager
-    let (services, loaded_count, failed_count) = load_services(&mut file_logger);
-    
-    // Log to console
+    let (_services, loaded_count, failed_count) = load_services(&mut file_logger);
+
     console_logger.message(
         LogLevel::Info,
         &format!("Service loading complete: {} loaded, {} failed.", loaded_count, failed_count),
-        std::time::Duration::ZERO,
+        Duration::ZERO,
     );
-   
+
     let manager = Manager::new(&mut file_logger);
-    // Start only the "base" and "network" startup package services
     manager.start_startup_services(&["base", "network"], &mut file_logger, &mut console_logger);
 
-    // Set up channel to receive shutdown/reboot commands from IPC server
     let (shutdown_tx, shutdown_rx) = channel::<IpcCommand>();
 
-    // Spawn IPC server in a background thread, passing sender side of channel
     let ipc_shutdown_tx = shutdown_tx.clone();
     thread::spawn(move || {
         if let Err(e) = run_ipc_server(ipc_shutdown_tx) {
@@ -50,31 +49,36 @@ fn main() {
         }
     });
 
-    // Main event loop, waits for shutdown or reboot commands
     loop {
         if let Ok(command) = shutdown_rx.recv() {
             match command {
                 IpcCommand::Shutdown | IpcCommand::Reboot => {
-                    console_logger.message(LogLevel::Info, "Shutting down all services...", Duration::ZERO);
+                    let msg = "Shutting down all services...";
+                    console_logger.message(LogLevel::Info, msg, Duration::ZERO);
+                    file_logger.log(LogLevel::Info, msg);
 
-                    // Use references directly instead of trying to extract owned supervisors
                     match manager.shutdown_all_services() {
                         Ok(_) => {
-                            console_logger.message(LogLevel::Ok, "All services stopped cleanly.", Duration::ZERO);
+                            let msg = "All services stopped cleanly.";
+                            console_logger.message(LogLevel::Ok, msg, Duration::ZERO);
+                            file_logger.log(LogLevel::Ok, msg);
                         }
                         Err(e) => {
-                            console_logger.message(LogLevel::Fail, &format!("Shutdown error: {e}"), Duration::ZERO);
+                            let msg = format!("Shutdown error: {e}");
+                            console_logger.message(LogLevel::Fail, &msg, Duration::ZERO);
+                            file_logger.log(LogLevel::Fail, &msg);
                         }
                     }
 
-                    // Notify init process that shutdown or reboot was requested
                     let notify = IpcRequest {
                         target: IpcTarget::Init,
                         command,
                     };
 
                     if let Err(e) = send_ipc_request(INIT_SOCKET_PATH, &notify) {
-                        console_logger.message(LogLevel::Fail, &format!("Failed to notify init: {e}"), Duration::ZERO);
+                        let msg = format!("Failed to notify init: {e}");
+                        console_logger.message(LogLevel::Fail, &msg, Duration::ZERO);
+                        file_logger.log(LogLevel::Fail, &msg);
                     }
 
                     std::process::exit(0);
@@ -84,7 +88,7 @@ fn main() {
                 }
             }
         }
-        // Sleep briefly to avoid busy loop if channel is empty
+
         thread::sleep(Duration::from_millis(100));
     }
 }

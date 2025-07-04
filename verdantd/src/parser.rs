@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, stdout, stderr};
+use std::io::{BufRead, BufReader};
 
 use crate::service::{Service, StartupPackage, RestartPolicy};
 use bloom::status::ServiceState;
