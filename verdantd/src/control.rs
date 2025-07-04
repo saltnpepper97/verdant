@@ -54,23 +54,25 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         cmd.args(&service.args);
     }
 
-    let stdout_path = service.stdout.as_deref().unwrap_or("/dev/console");
-    let stderr_path = service.stderr.as_deref().unwrap_or("/dev/console");
+    // Apply stdout redirection if explicitly set
+    if let Some(ref path) = service.stdout {
+        let stdout_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(BloomError::Io)?;
+        cmd.stdout(stdout_file);
+    }
 
-    let stdout_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(stdout_path)
-        .map_err(BloomError::Io)?;
-
-    let stderr_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(stderr_path)
-        .map_err(BloomError::Io)?;
-
-    cmd.stdout(stdout_file);
-    cmd.stderr(stderr_file);
+    // Apply stderr redirection if explicitly set
+    if let Some(ref path) = service.stderr {
+        let stderr_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(BloomError::Io)?;
+        cmd.stderr(stderr_file);
+    }
 
     let child = cmd.spawn().map_err(BloomError::Io)?;
 
