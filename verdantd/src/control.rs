@@ -83,6 +83,7 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
     unsafe {
         if is_tty_service {
             cmd.pre_exec(|| {
+                libc::setsid();
                 // Detach controlling terminal with ioctl TIOCNOTTY on stdin (fd 0)
                 // It's safe to ignore errors here since fd 0 may be closed sometimes
                 let _ = ioctl(0 as c_int, TIOCNOTTY);
