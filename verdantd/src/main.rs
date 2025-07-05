@@ -15,7 +15,7 @@ use crate::manager::Manager;
 use crate::loader::load_services;
 use crate::ipc_server::run_ipc_server;
 
-use bloom::ipc::{IpcCommand, IpcRequest, IpcTarget, send_ipc_request, INIT_SOCKET_PATH};
+use bloom::ipc::{IpcCommand, IpcRequest, IpcTarget, send_ipc_request, INIT_SOCKET_PATH, VERDANTD_SOCKET_PATH};
 use bloom::log::{ConsoleLogger, ConsoleLoggerImpl, FileLogger, FileLoggerImpl};
 use bloom::status::LogLevel;
 
@@ -46,16 +46,27 @@ fn main() {
     let manager = Manager::new(&mut file_logger);
     manager.start_startup_services(&["base", "network", "system"], &mut file_logger, &mut console_logger);
 
-    ipc_server::send_boot_complete(&mut file_logger);
-
     let (shutdown_tx, shutdown_rx) = channel::<IpcCommand>();
 
     let ipc_shutdown_tx = shutdown_tx.clone();
-    thread::spawn(move || {
-        if let Err(e) = run_ipc_server(ipc_shutdown_tx) {
-            eprintln!("IPC server failed: {}", e);
-        }
-    });
+
+
+console_logger.message(
+    LogLevel::Info,
+    &format!("Launching IPC socket at {}", VERDANTD_SOCKET_PATH),
+    Duration::ZERO,
+);
+file_logger.log(
+    LogLevel::Info,
+    &format!("Launching IPC socket at {}", VERDANTD_SOCKET_PATH),
+);
+
+thread::spawn(move || {
+    if let Err(e) = run_ipc_server(ipc_shutdown_tx) {
+        eprintln!("IPC server failed: {}", e);
+    }
+});
+
 
     loop {
         if let Ok(command) = shutdown_rx.recv() {
