@@ -50,7 +50,8 @@ impl ServiceHandle {
 /// Returns a `ServiceHandle` on success.
 pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
     use std::os::unix::process::CommandExt;
-    use libc::{setsid, ioctl, TIOCSCTTY};
+    use std::os::unix::io::AsRawFd;
+    use libc::{setsid, ioctl, TIOCSCTTY, close, dup2};
 
     let mut cmd = Command::new(&service.cmd);
     if !service.args.is_empty() {
@@ -79,18 +80,40 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
 
     // If it's a tty@ service, set controlling terminal
     if service.name.starts_with("tty@") {
+        // Extract tty device path, e.g. "tty1" → "/dev/tty1"
+        let tty_name = service.name.trim_start_matches("tty@").to_string();
+        let tty_path = format!("/dev/{}", tty_name);
+
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 // Become session leader
                 if setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
 
-                // Make fd 0 (stdin) the controlling TTY
-                if ioctl(0, TIOCSCTTY, 0) < 0 {
+                // Open the TTY device for read/write
+                let fd = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&tty_path)
+                    .map_err(|e| e)?;
+
+                // Set the controlling terminal to this fd
+                if ioctl(fd.as_raw_fd(), TIOCSCTTY, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
 
+                // Redirect stdin, stdout, stderr to the tty fd
+                for stdfd in 0..3 {
+                    // Close stdfd first
+                    close(stdfd);
+                    // Duplicate fd to stdfd
+                    if dup2(fd.as_raw_fd(), stdfd) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+
+                // fd will be closed automatically when going out of scope
                 Ok(())
             });
         }
@@ -104,7 +127,6 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         exit_status: None,
     })
 }
-
 
 /// Stop a running service cleanly.
 /// Returns Ok(true) if stopped gracefully, Ok(false) if killed forcibly.
