@@ -1,7 +1,3 @@
-use std::sync::mpsc::channel;
-use std::thread;
-use std::time::Duration;
-
 mod control;
 mod ipc_server;
 mod loader;
@@ -10,14 +6,19 @@ mod parser;
 mod service;
 mod shutdown;
 mod supervisor;
+mod tty;
 
-use crate::manager::Manager;
-use crate::loader::load_services;
-use crate::ipc_server::run_ipc_server;
+use std::sync::mpsc::channel;
+use std::thread;
+use std::time::Duration;
 
 use bloom::ipc::{IpcCommand, IpcRequest, IpcTarget, send_ipc_request, INIT_SOCKET_PATH, VERDANTD_SOCKET_PATH};
 use bloom::log::{ConsoleLogger, ConsoleLoggerImpl, FileLogger, FileLoggerImpl};
 use bloom::status::LogLevel;
+
+use crate::manager::Manager;
+use crate::loader::load_services;
+use crate::ipc_server::run_ipc_server;
 
 // Get the Cargo package version set at compile time
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -45,6 +46,13 @@ fn main() {
 
     let manager = Manager::new(&mut file_logger);
     manager.start_startup_services(&["base", "network", "system"], &mut file_logger, &mut console_logger);
+
+    
+thread::spawn(|| {
+    if let Err(e) = tty::spawn_tty("tty1") {
+        eprintln!("Failed to launch getty on tty1: {}", e);
+    }
+});
 
     let (shutdown_tx, shutdown_rx) = channel::<IpcCommand>();
 

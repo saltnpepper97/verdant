@@ -16,12 +16,6 @@ pub fn shutdown_all(supervisors: &[Arc<Mutex<Supervisor>>]) -> Result<(), BloomE
     for supervisor in supervisors {
         let mut sup = supervisor.lock().unwrap();
 
-        // Skip services that are known to cause shutdown hangs, e.g., tty/getty
-        if sup.service.name.contains("tty") || sup.service.tags.iter().any(|t| t == "tty") {
-            // Log skipping, or force kill immediately if you want:
-            continue; // Skip normal graceful stop for this service
-        }
-
         if let Some(handle) = sup.handle.as_mut() {
             // First try clean stop
             match handle.wait_with_timeout(Duration::from_secs(SHUTDOWN_TIMEOUT_SECS)) {
