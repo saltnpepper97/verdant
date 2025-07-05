@@ -107,8 +107,6 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
     })
 }
 
-
-
 /// Stop a running service cleanly.
 /// Returns Ok(true) if stopped gracefully, Ok(false) if killed forcibly.
 pub fn stop_service(handle: &mut ServiceHandle, timeout: Duration) -> Result<bool, BloomError> {
