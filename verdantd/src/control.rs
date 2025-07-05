@@ -3,6 +3,7 @@ use std::process::{Command, Child};
 use std::io;
 use std::time::{Duration, Instant};
 use std::thread::sleep;
+use std::os::unix::process::CommandExt;
 
 use crate::service::{RestartPolicy, Service};
 use bloom::errors::BloomError;
@@ -49,6 +50,8 @@ impl ServiceHandle {
 /// Start a service, spawning its process.
 /// Returns a `ServiceHandle` on success.
 pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
+    use nix::unistd::setsid;
+
     let mut cmd = Command::new(&service.cmd);
     if !service.args.is_empty() {
         cmd.args(&service.args);
@@ -74,6 +77,13 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         cmd.stderr(stderr_file);
     }
 
+    // Set child process in its own session/process group
+    unsafe {
+    cmd.pre_exec(|| {
+        setsid().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        Ok(())
+    });
+    }
     let child = cmd.spawn().map_err(BloomError::Io)?;
 
     Ok(ServiceHandle {
@@ -92,22 +102,25 @@ pub fn stop_service(handle: &mut ServiceHandle, timeout: Duration) -> Result<boo
         use nix::unistd::Pid;
 
         let pid = Pid::from_raw(handle.child.id() as i32);
+        let pgid = nix::unistd::getpgid(Some(pid)).unwrap_or(pid);
 
-        // Check if it's already exited before signaling
+        // Check if already exited before signaling
         if let Ok(Some(_)) = handle.child.try_wait() {
             // Already exited
             return Ok(true);
         }
 
-        kill(pid, Signal::SIGTERM).map_err(BloomError::from)?;
+        // Send SIGTERM to the entire process group
+        kill(Pid::from_raw(-pgid.as_raw()), Signal::SIGTERM).map_err(BloomError::from)?;
 
         match handle.wait_with_timeout(timeout)? {
             Some(_) => Ok(true),
             None => {
-                kill(pid, Signal::SIGKILL).map_err(BloomError::from)?;
+                // Timeout: send SIGKILL to the process group
+                kill(Pid::from_raw(-pgid.as_raw()), Signal::SIGKILL).map_err(BloomError::from)?;
                 match handle.wait_with_timeout(Duration::from_secs(5))? {
                     Some(_) => Ok(false),
-                    None => Err(BloomError::Custom("Failed to kill service process".into())),
+                    None => Err(BloomError::Custom("Failed to kill service process group".into())),
                 }
             }
         }
