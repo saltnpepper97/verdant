@@ -1,8 +1,17 @@
+
 use std::fs::OpenOptions;
 use std::process::{Command, Child};
 use std::io;
+use std::os::unix::process::CommandExt; // for pre_exec
+use std::os::unix::io::AsRawFd; // for fd conversion
 use std::time::{Duration, Instant};
 use std::thread::sleep;
+
+use nix::unistd::setsid;
+use nix::fcntl::{open, OFlag};
+use nix::sys::stat::Mode;
+use nix::unistd::close;
+use nix::errno::Errno;
 
 use crate::service::{RestartPolicy, Service};
 use bloom::errors::BloomError;
@@ -10,14 +19,14 @@ use bloom::errors::BloomError;
 pub struct ServiceHandle {
     pub child: Child,
     pub start_time: Instant,
-    pub exit_status: Option<i32>, // Track exit code
+    pub exit_status: Option<i32>,
 }
 
 impl ServiceHandle {
     pub fn is_running(&mut self) -> bool {
         match self.child.try_wait() {
             Ok(Some(status)) => {
-                self.exit_status = status.code(); // Record exit code
+                self.exit_status = status.code();
                 false
             }
             Ok(None) => true,
@@ -27,18 +36,16 @@ impl ServiceHandle {
 
     pub fn wait_with_timeout(&mut self, timeout: Duration) -> io::Result<Option<i32>> {
         let start = Instant::now();
-
         while start.elapsed() < timeout {
             match self.child.try_wait()? {
                 Some(status) => {
-                    self.exit_status = status.code(); // Record on wait too
+                    self.exit_status = status.code();
                     return Ok(status.code());
                 }
                 None => sleep(Duration::from_millis(50)),
             }
         }
-
-        Ok(None) // timed out
+        Ok(None)
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
@@ -46,76 +53,75 @@ impl ServiceHandle {
     }
 }
 
-/// Start a service, spawning its process.
-/// Returns a `ServiceHandle` on success.
-pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
-    use std::os::unix::process::CommandExt;
-    use std::os::unix::io::AsRawFd;
-    use libc::{setsid, ioctl, TIOCSCTTY, close, dup2};
+fn setup_getty_preexec(tty_path: &str) -> Result<(), std::io::Error> {
+    setsid().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("setsid failed: {}", e)))?;
 
+    let fd = open(tty_path, OFlag::O_RDWR | OFlag::O_NOCTTY, Mode::empty())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open tty failed: {}", e)))?;
+
+    // Convert OwnedFd to raw fd for ioctl:
+    let raw_fd = fd.as_raw_fd();
+
+    let res = unsafe { libc::ioctl(raw_fd, libc::TIOCSCTTY, 0) };
+    if res != 0 {
+        let err = Errno::last();
+        let _ = close(fd);
+        return Err(io::Error::new(io::ErrorKind::Other, format!("ioctl TIOCSCTTY failed: {}", err)));
+    }
+
+    close(fd).ok();
+
+    Ok(())
+}
+
+pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
     let mut cmd = Command::new(&service.cmd);
+
     if !service.args.is_empty() {
         cmd.args(&service.args);
     }
 
-    // Apply stdout redirection if explicitly set
-    if let Some(ref path) = service.stdout {
-        let stdout_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(BloomError::Io)?;
-        cmd.stdout(stdout_file);
-    }
+    let is_getty = service.cmd.contains("getty") || service.cmd.contains("agetty") ||
+                   service.name.starts_with("getty@") || service.name.starts_with("agetty@");
 
-    // Apply stderr redirection if explicitly set
-    if let Some(ref path) = service.stderr {
-        let stderr_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(BloomError::Io)?;
-        cmd.stderr(stderr_file);
-    }
+    if is_getty {
+        // Fix: unify types to &str by mapping service.args iter & service.name split to &str
+        let tty_opt = service.args.iter()
+            .map(|s| s.as_str())
+            .find(|arg| arg.starts_with("tty"))
+            .or_else(|| service.name.split('@').nth(1));
 
-    // If it's a tty@ service, set controlling terminal
-    if service.name.starts_with("tty@") {
-        // Extract tty device path, e.g. "tty1" → "/dev/tty1"
-        let tty_name = service.name.trim_start_matches("tty@").to_string();
-        let tty_path = format!("/dev/{}", tty_name);
+        if let Some(tty) = tty_opt {
+            let tty_path = format!("/dev/{}", tty);
 
-        unsafe {
+            unsafe {
             cmd.pre_exec(move || {
-                // Become session leader
-                if setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-
-                // Open the TTY device for read/write
-                let fd = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&tty_path)
-                    .map_err(|e| e)?;
-
-                // Set the controlling terminal to this fd
-                if ioctl(fd.as_raw_fd(), TIOCSCTTY, 0) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-
-                // Redirect stdin, stdout, stderr to the tty fd
-                for stdfd in 0..3 {
-                    // Close stdfd first
-                    close(stdfd);
-                    // Duplicate fd to stdfd
-                    if dup2(fd.as_raw_fd(), stdfd) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-
-                // fd will be closed automatically when going out of scope
+                setup_getty_preexec(&tty_path)?;
                 Ok(())
             });
+            }
+            // For getty, avoid stdio redirection to prevent conflicts
+            cmd.stdin(std::process::Stdio::null());
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+        }
+    } else {
+        if let Some(ref path) = service.stdout {
+            let stdout_file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(BloomError::Io)?;
+            cmd.stdout(stdout_file);
+        }
+
+        if let Some(ref path) = service.stderr {
+            let stderr_file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(BloomError::Io)?;
+            cmd.stderr(stderr_file);
         }
     }
 
@@ -127,6 +133,7 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         exit_status: None,
     })
 }
+
 
 /// Stop a running service cleanly.
 /// Returns Ok(true) if stopped gracefully, Ok(false) if killed forcibly.
