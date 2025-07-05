@@ -50,8 +50,7 @@ impl ServiceHandle {
 /// Returns a `ServiceHandle` on success.
 pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
     use std::os::unix::process::CommandExt;
-    use std::ffi::CString;
-    use libc::{setsid, open, ioctl, close, O_RDWR, TIOCNOTTY};
+    use libc::{setsid, ioctl, TIOCSCTTY};
 
     let mut cmd = Command::new(&service.cmd);
     if !service.args.is_empty() {
@@ -78,21 +77,20 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         cmd.stderr(stderr_file);
     }
 
-    // If it's a tty@ service, set up pre_exec to detach from terminal
+    // If it's a tty@ service, set controlling terminal
     if service.name.starts_with("tty@") {
-        // Clone path safely to move into closure
-        let tty_path = format!("/dev/{}", service.name.trim_start_matches("tty@"));
-
         unsafe {
-            cmd.pre_exec(move || {
-                setsid();
-
-                let c_tty = CString::new(tty_path.clone()).unwrap();
-                let fd = open(c_tty.as_ptr(), O_RDWR);
-                if fd >= 0 {
-                    ioctl(fd, TIOCNOTTY as _);
-                    close(fd);
+            cmd.pre_exec(|| {
+                // Become session leader
+                if setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
                 }
+
+                // Make fd 0 (stdin) the controlling TTY
+                if ioctl(0, TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
                 Ok(())
             });
         }
@@ -106,6 +104,7 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         exit_status: None,
     })
 }
+
 
 /// Stop a running service cleanly.
 /// Returns Ok(true) if stopped gracefully, Ok(false) if killed forcibly.
