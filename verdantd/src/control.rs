@@ -4,7 +4,8 @@ use std::io;
 use std::time::{Duration, Instant};
 use std::thread::sleep;
 use std::os::unix::process::CommandExt;
-
+use std::ffi::c_int;
+use nix::libc::{ioctl, TIOCNOTTY};
 use crate::service::{RestartPolicy, Service};
 use bloom::errors::BloomError;
 
@@ -75,13 +76,23 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         cmd.stderr(stderr_file);
     }
 
+    // Detect if this service is a TTY service by name
+    let is_tty_service = service.name.contains("tty@") || service.name.contains("tty");
+
     #[cfg(unix)]
     unsafe {
-        cmd.pre_exec(|| {
-            // Detach from controlling terminal by creating a new session
-            libc::setsid();
-            Ok(())
-        });
+        if is_tty_service {
+            cmd.pre_exec(|| {
+                // Detach controlling terminal with ioctl TIOCNOTTY on stdin (fd 0)
+                // It's safe to ignore errors here since fd 0 may be closed sometimes
+                let _ = ioctl(0 as c_int, TIOCNOTTY);
+
+                Ok(())
+            });
+        } else {
+            // For non-TTY services, just setsid() to isolate session if you want,
+            // or do nothing. Here I leave it as-is for normal spawn.
+        }
     }
 
     let child = cmd.spawn().map_err(BloomError::Io)?;
@@ -92,6 +103,7 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         exit_status: None,
     })
 }
+
 
 /// Stop a running service cleanly.
 /// Returns Ok(true) if stopped gracefully, Ok(false) if killed forcibly.
