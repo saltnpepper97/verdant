@@ -3,9 +3,7 @@ use std::process::{Command, Child};
 use std::io;
 use std::time::{Duration, Instant};
 use std::thread::sleep;
-use std::os::unix::process::CommandExt;
-use std::ffi::c_int;
-use nix::libc::{ioctl, TIOCNOTTY};
+
 use crate::service::{RestartPolicy, Service};
 use bloom::errors::BloomError;
 
@@ -51,6 +49,10 @@ impl ServiceHandle {
 /// Start a service, spawning its process.
 /// Returns a `ServiceHandle` on success.
 pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
+    use std::os::unix::process::CommandExt;
+    use std::ffi::CString;
+    use libc::{setsid, open, ioctl, close, O_RDWR, TIOCNOTTY};
+
     let mut cmd = Command::new(&service.cmd);
     if !service.args.is_empty() {
         cmd.args(&service.args);
@@ -76,23 +78,23 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         cmd.stderr(stderr_file);
     }
 
-    // Detect if this service is a TTY service by name
-    let is_tty_service = service.name.contains("tty@") || service.name.contains("tty");
+    // If it's a tty@ service, set up pre_exec to detach from terminal
+    if service.name.starts_with("tty@") {
+        // Clone path safely to move into closure
+        let tty_path = format!("/dev/{}", service.name.trim_start_matches("tty@"));
 
-    #[cfg(unix)]
-    unsafe {
-        if is_tty_service {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                // Detach controlling terminal with ioctl TIOCNOTTY on stdin (fd 0)
-                // It's safe to ignore errors here since fd 0 may be closed sometimes
-                let _ = ioctl(0 as c_int, TIOCNOTTY);
+        unsafe {
+            cmd.pre_exec(move || {
+                setsid();
 
+                let c_tty = CString::new(tty_path.clone()).unwrap();
+                let fd = open(c_tty.as_ptr(), O_RDWR);
+                if fd >= 0 {
+                    ioctl(fd, TIOCNOTTY as _);
+                    close(fd);
+                }
                 Ok(())
             });
-        } else {
-            // For non-TTY services, just setsid() to isolate session if you want,
-            // or do nothing. Here I leave it as-is for normal spawn.
         }
     }
 
@@ -104,6 +106,7 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
         exit_status: None,
     })
 }
+
 
 
 /// Stop a running service cleanly.
