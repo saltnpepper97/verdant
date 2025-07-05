@@ -44,7 +44,9 @@ fn main() {
     );
 
     let manager = Manager::new(&mut file_logger);
-    manager.start_startup_services(&["base", "network"], &mut file_logger, &mut console_logger);
+    manager.start_startup_services(&["base", "network", "system"], &mut file_logger, &mut console_logger);
+
+    ipc_server::send_boot_complete(&mut file_logger);
 
     let (shutdown_tx, shutdown_rx) = channel::<IpcCommand>();
 

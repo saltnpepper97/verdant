@@ -48,6 +48,8 @@ pub enum IpcCommand {
 
     // Internal messages
     Internal(IpcInternal),
+
+    BootComplete,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -16,6 +16,7 @@ use serde_json;
 pub fn run_ipc_server(
     shutdown_flag: Arc<AtomicBool>,
     reboot_flag: Arc<AtomicBool>,
+    boot_complete_flag: Arc<AtomicBool>,
     console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
     file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>>,
     main_thread: std::thread::Thread,
@@ -26,16 +27,12 @@ pub fn run_ipc_server(
 
     let listener = UnixListener::bind(INIT_SOCKET_PATH)?;
 
-    log_message(&console_logger, &file_logger, LogLevel::Info, &format!(
-        "Init IPC server listening on {}",
-        INIT_SOCKET_PATH
-    ));
-
     for stream_result in listener.incoming() {
         match stream_result {
             Ok(mut stream) => {
                 let shutdown_flag = Arc::clone(&shutdown_flag);
                 let reboot_flag = Arc::clone(&reboot_flag);
+                let boot_complete_flag = Arc::clone(&boot_complete_flag);
                 let console_logger = Arc::clone(&console_logger);
                 let file_logger = Arc::clone(&file_logger);
                 let main_thread = main_thread.clone();
@@ -44,6 +41,7 @@ pub fn run_ipc_server(
                     &mut stream,
                     shutdown_flag,
                     reboot_flag,
+                    boot_complete_flag,
                     console_logger,
                     file_logger,
                     main_thread,
@@ -62,6 +60,7 @@ fn handle_client(
     stream: &mut UnixStream,
     shutdown_flag: Arc<AtomicBool>,
     reboot_flag: Arc<AtomicBool>,
+    boot_complete_flag: Arc<AtomicBool>,
     console_logger: Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
     file_logger: Arc<Mutex<dyn FileLogger + Send + Sync>>,
     main_thread: std::thread::Thread,
@@ -85,7 +84,6 @@ fn handle_client(
 
     match request.command {
         IpcCommand::Shutdown => {
-            // Respond immediately
             let resp = IpcResponse {
                 success: true,
                 message: "Shutdown scheduled".into(),
@@ -93,15 +91,13 @@ fn handle_client(
             };
             stream.write_all(&serialize_response(&resp))?;
 
-            // Delay flag set/unpark to avoid blocking client
-            let shutdown_flag_clone = Arc::clone(&shutdown_flag);
             thread::spawn(move || {
-                shutdown_flag_clone.store(true, Ordering::SeqCst);
+                shutdown_flag.store(true, Ordering::SeqCst);
                 main_thread.unpark();
             });
         }
+
         IpcCommand::Reboot => {
-            // Respond immediately
             let resp = IpcResponse {
                 success: true,
                 message: "Reboot scheduled".into(),
@@ -109,13 +105,30 @@ fn handle_client(
             };
             stream.write_all(&serialize_response(&resp))?;
 
-            // Delay flag set/unpark to avoid blocking client
-            let reboot_flag_clone = Arc::clone(&reboot_flag);
-            main_thread.unpark();
             thread::spawn(move || {
-                reboot_flag_clone.store(true, Ordering::SeqCst);
+                reboot_flag.store(true, Ordering::SeqCst);
+                main_thread.unpark();
             });
         }
+
+        IpcCommand::BootComplete => {
+            let resp = IpcResponse {
+                success: true,
+                message: "Boot complete acknowledged".into(),
+                data: None,
+            };
+            stream.write_all(&serialize_response(&resp))?;
+
+            if let Ok(mut file) = file_logger.lock() {
+                file.log(LogLevel::Info, "Verdantd reported boot complete.");
+            }
+
+            thread::spawn(move || {
+                boot_complete_flag.store(true, Ordering::SeqCst);
+                main_thread.unpark();
+            });
+        }
+
         _ => {
             let resp = IpcResponse {
                 success: false,
@@ -123,24 +136,16 @@ fn handle_client(
                 data: None,
             };
             stream.write_all(&serialize_response(&resp))?;
-            log_message(&console_logger, &file_logger, LogLevel::Fail, "Unsupported command for init");
+
+            if let Ok(mut file) = file_logger.lock() {
+                file.log(LogLevel::Fail, "Unsupported command for init");
+            }
+            if let Ok(mut con) = console_logger.lock() {
+                con.message(LogLevel::Fail, "Unsupported command for init", std::time::Duration::ZERO);
+            }
         }
     }
 
     Ok(())
-}
-
-fn log_message(
-    console_logger: &Arc<Mutex<dyn ConsoleLogger + Send + Sync>>,
-    file_logger: &Arc<Mutex<dyn FileLogger + Send + Sync>>,
-    level: LogLevel,
-    msg: &str,
-) {
-    if let Ok(mut con) = console_logger.lock() {
-        con.message(level, msg, std::time::Duration::ZERO);
-    }
-    if let Ok(mut file) = file_logger.lock() {
-        file.log(level, msg);
-    }
 }
 

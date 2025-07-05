@@ -1,6 +1,7 @@
 use std::sync::mpsc::Sender;
-
-use bloom::ipc::{IpcCommand, IpcRequest, IpcResponse, serve_ipc_socket, VERDANTD_SOCKET_PATH};
+use std::time::Duration;
+use bloom::ipc::{IpcCommand, IpcRequest, IpcResponse, IpcTarget, serve_ipc_socket, send_ipc_request, INIT_SOCKET_PATH, VERDANTD_SOCKET_PATH};
+use bloom::log::{ConsoleLogger, FileLogger};
 
 /// Spawns the IPC server for verdantd. Handles shutdown and reboot commands.
 ///
@@ -42,3 +43,25 @@ pub fn run_ipc_server(shutdown_tx: Sender<IpcCommand>) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn send_boot_complete(
+    file_logger: &mut dyn FileLogger,
+) {
+    let notify = IpcRequest {
+        target: IpcTarget::Init,
+        command: IpcCommand::BootComplete,
+    };
+
+    match send_ipc_request(INIT_SOCKET_PATH, &notify) {
+        Ok(resp) if resp.success => {
+            file_logger.log(bloom::status::LogLevel::Info, "Notified init: Verdantd boot complete.");
+        }
+        Ok(resp) => {
+            let msg = format!("Init responded with failure: {}", resp.message);
+            file_logger.log(bloom::status::LogLevel::Warn, &msg);
+        }
+        Err(e) => {
+            let msg = format!("Failed to notify init of boot complete: {}", e);
+            file_logger.log(bloom::status::LogLevel::Fail, &msg);
+        }
+    }
+}
