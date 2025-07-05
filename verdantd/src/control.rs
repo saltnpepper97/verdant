@@ -3,6 +3,7 @@ use std::process::{Command, Child};
 use std::io;
 use std::time::{Duration, Instant};
 use std::thread::sleep;
+use std::os::unix::process::CommandExt;
 
 use crate::service::{RestartPolicy, Service};
 use bloom::errors::BloomError;
@@ -72,6 +73,15 @@ pub fn start_service(service: &Service) -> Result<ServiceHandle, BloomError> {
             .open(path)
             .map_err(BloomError::Io)?;
         cmd.stderr(stderr_file);
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            // Detach from controlling terminal by creating a new session
+            libc::setsid();
+            Ok(())
+        });
     }
 
     let child = cmd.spawn().map_err(BloomError::Io)?;
